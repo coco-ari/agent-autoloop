@@ -231,19 +231,55 @@ function idleWorker(results: any[]) {
       work: async () => ({ job: null, cancel: [] }),
       started: async () => ({}),
       result: async (_run: number, _token: string, body: unknown) => {
-        results.push(body);
+        results.push({ ...(body as Record<string, unknown>), run: _run });
         return {};
       },
     } as any,
   });
 }
 
-test("a stopped run whose group can't be seen is reported as failed, never as cancelled", async () => {
+test("启动前条目核对断联不阻止其他已停止进程继续核实", async () => {
+  psCannotRun();
+  const group = ownGroup();
+  group.kill();
+  await group.gone;
+  const cleanRunning = stoppedRun(118, group.pid);
+  const cleanPending = stoppedRun(119, 0, { turn: 0, why: undefined, stopping: undefined });
+  const results: any[] = [];
+  const worker = createWorker({
+    name: "test",
+    wait: 0,
+    hub: {
+      work: async () => {
+        throw new Error("隔离断联");
+      },
+      started: async () => ({}),
+      result: async (run, _token, body) => {
+        results.push({ run, body });
+        return {};
+      },
+    },
+  });
+  try {
+    assert.equal(await worker.tick(), false);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].run, 118);
+    assert.equal(results[0].body.outcome, "cancelled");
+    assert.equal(worker.entries().find((entry) => entry.run === 119)?.turn, 0);
+  } finally {
+    cleanRunning();
+    cleanPending();
+  }
+});
+
+test("无法核实停止时保留执行记录，恢复检查后才提交结束", async () => {
   psCannotRun();
   const group = ownGroup();
   const clean = stoppedRun(18, group.pid);
   const results: any[] = [];
   const originalKill = process.kill;
+  const originalPath = process.env.PATH;
+  const worker = idleWorker(results);
   try {
     process.kill = ((target: number, signal?: string | number) => {
       if (target === -group.pid) {
@@ -253,19 +289,31 @@ test("a stopped run whose group can't be seen is reported as failed, never as ca
       }
       return originalKill(target, signal as NodeJS.Signals);
     }) as typeof process.kill;
-    await idleWorker(results).tick();
+    await worker.tick();
+    assert.equal(results.length, 0, "无法核实时不能提交 failed 或 cancelled");
+    assert.ok(
+      worker.entries().some((entry) => entry.run === 18),
+      "停止请求和执行身份必须保留",
+    );
+    process.kill = originalKill;
+    group.kill();
+    await group.gone;
+    process.env.PATH = originalPath
+      ?.split(":")
+      .filter((part) => part !== bin)
+      .join(":");
+    await worker.tick();
+    assert.equal(results.find((result) => result.run === 18)?.outcome, "cancelled");
+    assert.equal(
+      worker.entries().some((entry) => entry.run === 18),
+      false,
+    );
   } finally {
     process.kill = originalKill;
+    process.env.PATH = originalPath;
     group.kill();
     clean();
   }
-  assert.equal(results.length, 1, "the run was never handed in");
-  assert.equal(
-    results[0].outcome,
-    "failed",
-    "cancelled would release the item while a process may still be running in it",
-  );
-  assert.match(String(results[0].error), /没能确认/, "the reason has to say what wasn't seen");
 });
 
 test("a stopped run whose group is gone is cancelled even when ps can't run", async () => {
@@ -301,13 +349,14 @@ test("a stopped run whose group is still there is not handed in until it has gon
   assert.equal(results[0]?.outcome, "cancelled", "the stop was confirmed once the group had gone");
 });
 
-test("a run stopped because its turn was over keeps its answer when its group can't be seen", async () => {
+test("已产出答案但退出未知时继续核实，确认后仍保留原答案", async () => {
   psCannotRun();
   const group = ownGroup();
   const clean = stoppedRun(21, group.pid, { why: "finished", finishedAt: Date.now() - 30_000 });
   writeFileSync(join(runs, "21-1", "stdout-1.log"), "做完了");
   const results: any[] = [];
   const originalKill = process.kill;
+  const worker = idleWorker(results);
   try {
     process.kill = ((target: number, signal?: string | number) => {
       if (target === -group.pid) {
@@ -317,7 +366,12 @@ test("a run stopped because its turn was over keeps its answer when its group ca
       }
       return originalKill(target, signal as NodeJS.Signals);
     }) as typeof process.kill;
-    await idleWorker(results).tick();
+    await worker.tick();
+    assert.equal(results.length, 0);
+    process.kill = originalKill;
+    group.kill();
+    await group.gone;
+    await worker.tick();
   } finally {
     process.kill = originalKill;
     group.kill();
@@ -326,4 +380,68 @@ test("a run stopped because its turn was over keeps its answer when its group ca
   assert.equal(results.length, 1, "the run was never handed in");
   assert.notEqual(results[0].outcome, "failed", "a failed run is tried again, and the work it did is done twice");
   assert.match(String(results[0].summary), /做完了/);
+});
+
+test("已开始收尾的轮次收到取消后保留原宽限期且不再修复回执", async () => {
+  psCannotRun();
+  const group = ownGroup();
+  const clean = stoppedRun(120, group.pid, { why: "finished" });
+  const results: any[] = [];
+  const worker = createWorker({
+    name: "test",
+    wait: 0,
+    hub: {
+      work: async () => ({ job: null, cancel: [120] }),
+      started: async () => ({}),
+      result: async (_run, _token, body) => {
+        results.push(body);
+        return {};
+      },
+    },
+  });
+  const originalStop = worker.entries().find((entry) => entry.run === 120)?.stopping;
+  try {
+    await worker.tick();
+    assert.equal(worker.entries().find((entry) => entry.run === 120)?.why, "cancel");
+    assert.equal(worker.entries().find((entry) => entry.run === 120)?.stopping, originalStop);
+    await group.gone;
+    await worker.tick();
+    assert.equal(results[0]?.outcome, "cancelled");
+  } finally {
+    group.kill();
+    clean();
+  }
+});
+
+test("插件缺失不能结束仍在运行的轮次，取消核实不依赖插件", async () => {
+  psCannotRun();
+  const group = ownGroup();
+  const missing = jobFor(121, 30);
+  missing.agent.use = "missing-task-test-adapter";
+  const clean = stoppedRun(121, group.pid, { job: missing, why: undefined, stopping: undefined });
+  const results: any[] = [];
+  const worker = createWorker({
+    name: "test",
+    wait: 0,
+    hub: {
+      work: async () => ({ job: null, cancel: [121] }),
+      started: async () => ({}),
+      result: async (_run, _token, body) => {
+        results.push(body);
+        return {};
+      },
+    },
+  });
+  try {
+    await worker.tick();
+    assert.equal(results.length, 0);
+    assert.equal(worker.entries().find((entry) => entry.run === 121)?.why, "cancel");
+    group.kill();
+    await group.gone;
+    await worker.tick();
+    assert.equal(results[0]?.outcome, "cancelled");
+  } finally {
+    group.kill();
+    clean();
+  }
 });

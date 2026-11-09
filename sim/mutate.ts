@@ -12,12 +12,7 @@ const edits: [string, string, string, string][] = [
   ["resume-after-stop", "decide.ts", 'last?.state !== "cancelled" && ', ""],
   ["group-capacity", "decide.ts", "claimed.filter((other) => other.grp === run.grp).length <", "0 <"],
   ["lane-exclusion", "decide.ts", "!claimed.some((other) => other.grp === run.grp && other.lane === run.lane)", "true"],
-  [
-    "worker-boundary",
-    "decide.ts",
-    'run.state === "queued" &&\n    agents.includes(ruleNamed(draft, run.rule)?.to ?? "")',
-    'run.state === "queued" &&\n    true',
-  ],
+  ["worker-boundary", "decide.ts", 'agents.includes(ruleNamed(draft, run.rule)?.to ?? "")', "true"],
   ["retry-delay", "decide.ts", "5 * MINUTE * 2 ** (attempts - 1)", "0 * MINUTE * 2 ** (attempts - 1)"],
   [
     "receipt-replay",
@@ -58,6 +53,8 @@ const edits: [string, string, string, string][] = [
   ["stale-commit", "store.ts", "if (latest !== view.seq)", "if (false)"],
   ["log-append", "store.ts", "for (const fact of facts) insert.run", "for (const fact of []) insert.run"],
   ["transaction-removed", "store.ts", "return transaction(db, () => {", "return ((work) => work())(() => {"],
+  ["task-stop-intent", "decide.ts", "stop_requested_at: draft.at", "stop_requested_at: null"],
+  ["task-late-receipt", "decide.ts", "if (stoppedTask(draft, run))", "if (false)"],
 ];
 const tests = [
   "kernel",
@@ -70,6 +67,7 @@ const tests = [
   "queue-costs",
   "http",
   "resume-thread",
+  "task-stop",
 ].map((n) => `tests/${n}.test.ts`);
 export function mutate() {
   const root = join(import.meta.dirname, "..");

@@ -9,16 +9,16 @@ import { cronOf, eventRule, SCHEDULE, type Rules } from "../kernel/rules.ts";
 
 /** The columns of the read-only SQL views over the projections, which the queries here read. */
 const VIEWS = {
-  events: "id source key type subject summary detail link routed paused received_at",
+  events: "id source key type subject summary detail link routed paused received_at task_id",
   runs:
     "id rule agent grp lane state attempts not_before claim last_result cancel_at resume session link created_at " +
-    "claimed_at seen_at finished_at manual summary error usage",
+    "claimed_at seen_at finished_at manual summary error usage task_id",
   run_events: "run_id event_id",
   cards:
     "id key kind title text options recommend about state fyi quiet choice answer by result rule lane grp source " +
-    "agent session run_id answer_event version created_at decided_at closed_at",
+    "agent session run_id answer_event version created_at decided_at closed_at task_id",
   deliveries: "card_id channel version ref tries first_try_at not_before error given_up",
-  timers: "id rule lane key source session about at event_id created_at",
+  timers: "id rule lane key source session about at event_id created_at task_id",
   schedules: "rule cron next_at skipped_at",
   seen: "kind name seen_at",
   keys: "kind name hash created_at",
@@ -103,7 +103,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
   const recentCards = all<Row>("SELECT * FROM cards WHERE state <> 'open' ORDER BY id DESC LIMIT 20");
   const timers = before
     ? []
-    : all<Row>("SELECT rule, lane, key, about, at FROM timers WHERE event_id IS NULL ORDER BY at");
+    : all<Row>("SELECT rule, lane, key, about, at, task_id FROM timers WHERE event_id IS NULL ORDER BY at");
   const older = before ? "WHERE id < ?" : "";
   const page = all<Row>(
     `SELECT * FROM runs ${older} ORDER BY id DESC LIMIT ?`,
@@ -132,7 +132,14 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     // The owner's own: which matter a card is about, and what its asker left for whoever carries on. Channels don't get them.
     cards: openCards.map((card) => ({ ...view(card), lane: card.lane, about: card.about })),
     recentCards: recentCards.map((card) => ({ ...view(card), lane: card.lane, about: card.about })),
-    timers: timers.map(({ rule, lane, key, about, at }) => ({ rule, lane, key, about, at })),
+    timers: timers.map(({ rule, lane, key, about, at, task_id }) => ({
+      rule,
+      lane,
+      key,
+      about,
+      at,
+      ...(task_id && { taskId: task_id }),
+    })),
     sources: Object.entries(rules.sources).map(([id, { name }]) => {
       const events = all<Row>("SELECT COUNT(*) AS n FROM events WHERE source = ?", [id])[0].n as number;
       return { id, name, events };
@@ -167,6 +174,7 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     channels: Object.entries(rules.channels).map(([id, { name }]) => ({ id, name, ...presence(`channel:${id}`) })),
     runs: visible.map((run) => ({
       id: run.id as number,
+      ...(run.task_id && { taskId: run.task_id }),
       rule: run.rule,
       agent: run.agent,
       state: run.state,

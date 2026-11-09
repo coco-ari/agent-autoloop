@@ -2,6 +2,7 @@
 import { DatabaseSync, type StatementSync, type SQLInputValue } from "node:sqlite";
 export type Row = Record<string, any>;
 export const TABLES = [
+  "tasks",
   "events",
   "runs",
   "run_events",
@@ -21,8 +22,9 @@ export type Fact = { version: 1; seq: number; at: number; type: string; changes:
 export type Match = Record<string, SQLInputValue | SQLInputValue[] | { not: null }>;
 const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers"]);
 const indexes: Partial<Record<Table, string[][]>> = {
+  tasks: [["project"]],
   events: [["source", "key"], ["routed", "id"], ["paused", "id"], ["id"]],
-  runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"]],
+  runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"], ["task_id", "state"]],
   run_events: [["run_id"], ["event_id"]],
   cards: [
     ["key", "id"],
@@ -176,6 +178,7 @@ export class View {
   }
 }
 export function keyOf(table: Table, row: Row): string {
+  if (table === "tasks") return row.id;
   if (NUMBERED.has(table)) return String(row.id);
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;
   if (table === "deliveries") return `${row.card_id}:${row.channel}`;

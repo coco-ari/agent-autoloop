@@ -8,6 +8,7 @@ const rows = (view: Snapshot, table: keyof Snapshot["tables"]) => Object.values(
 export function replay(log: Fact[]): Snapshot {
   const tables = Object.fromEntries(
     [
+      "tasks",
       "events",
       "runs",
       "run_events",

@@ -67,7 +67,7 @@ type Entry = {
   finishedAt?: number;
   told?: string;
   stopping?: number;
-  why?: "cancel" | "timeout" | "finished";
+  why?: "cancel" | "timeout" | "finished" | "adapter";
   result?: Result;
 };
 export type WorkerHub = Pick<Hub, "work" | "started" | "result">;
@@ -310,7 +310,7 @@ export function createWorker({
     save(entry);
   }
 
-  async function start(job: Job) {
+  async function start(job: Job, cancelled = false) {
     const dir = path.join(RUNS, `${job.run}-${job.attempt}`);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const entry: Entry = {
@@ -328,6 +328,7 @@ export function createWorker({
     };
     // Kept before anything slow: a worker stopped from here on still has the job.
     save(entry);
+    if (cancelled) return endWith(entry, { outcome: "cancelled", summary: "启动前已停止" });
     try {
       writeFileSync(path.join(dir, "context.json"), JSON.stringify(job.context, null, 2), { mode: 0o600 });
       const adapter = await adapterFor(job.agent.use);
@@ -377,6 +378,8 @@ export function createWorker({
     const usage = entry.usage && { usage: entry.usage };
     const known = session && { session };
     if (entry.why === "cancel") return endWith(entry, { outcome: "cancelled", summary: "已停止", ...known, ...usage });
+    if (entry.why === "adapter")
+      return endWith(entry, { outcome: "failed", error: "执行插件不可用，已核实进程停止", ...known, ...usage });
     if (entry.why === "timeout") {
       const minutes = entry.job.agent.timeout ?? TIMEOUT_MINUTES;
       const error = `超过 ${minutes} 分钟还没结束，已停止`;
@@ -423,11 +426,33 @@ export function createWorker({
   /** Looks at a run in hand: still going, to be stopped, or ended. */
   async function check(entry: Entry) {
     if (entry.result) return;
+    if (entry.turn === 0 && entry.why === "cancel")
+      return endWith(entry, { outcome: "cancelled", summary: "启动前已停止" });
+    let groupEnded = false;
+    if (entry.stopping !== undefined) {
+      const going = await groupAlive(entry);
+      if (going !== false) {
+        if (now() - entry.stopping > STOP_GRACE) signal(entry, "SIGKILL");
+        if (going === null) sayOnce(`run ${entry.run}: 无法核实进程已结束，保留停止请求继续检查`);
+        return;
+      }
+      groupEnded = true;
+    }
     let adapter: Adapter;
     try {
       adapter = await adapterFor(entry.job.agent.use);
     } catch (error) {
-      return endWith(entry, { outcome: "failed", error: String((error as Error).message).slice(0, 500) });
+      if (entry.turn > 0 && !groupEnded && (await groupAlive(entry)) !== false) {
+        stop(entry, "adapter");
+        return;
+      }
+      const known = { ...(entry.session && { session: entry.session }), ...(entry.usage && { usage: entry.usage }) };
+      return endWith(
+        entry,
+        entry.why === "cancel"
+          ? { outcome: "cancelled", summary: "已核实停止", ...known }
+          : { outcome: "failed", error: String((error as Error).message).slice(0, 500), ...known },
+      );
     }
     if (entry.turn === 0) {
       // The worker stopped while starting it, before anything was launched.
@@ -443,28 +468,7 @@ export function createWorker({
     }
     const { exit } = files(entry);
     const exitCode = () => (existsSync(exit) ? Number(readFileSync(exit, "utf8").trim()) : null);
-    if (entry.stopping !== undefined) {
-      const going = await groupAlive(entry);
-      const overdue = now() - entry.stopping > STOP_GRACE;
-      if (going === true) {
-        if (overdue) signal(entry, "SIGKILL");
-        return;
-      }
-      if (going === null) {
-        // The forced kill is the last thing that can be done to it, and whether it worked can't be seen.
-        if (!overdue) return;
-        signal(entry, "SIGKILL");
-        // A turn that was over, or a timeout, ends on what it said: `failed` there is tried again, redoing work done.
-        if (entry.why !== "cancel") return conclude(entry, adapter, exitCode());
-        // Reporting `cancelled` would release the item while a process may still be in it, which the protocol forbids
-        // (docs/protocol.md: 确认组内没有活进程后才交 cancelled). A cancelled run's `failed` isn't tried again.
-        return endWith(entry, {
-          outcome: "failed",
-          error: "停止信号发出后没能确认进程组已结束：这一轮按没跑成记，不再重试，进程可能还在。",
-        });
-      }
-      return conclude(entry, adapter, exitCode());
-    }
+    if (groupEnded) return conclude(entry, adapter, exitCode());
     if (existsSync(exit)) return conclude(entry, adapter, exitCode());
     // The shell can publish its exit between the first file check and ps returning.
     const looking = await alive(entry);
@@ -503,7 +507,15 @@ export function createWorker({
   }
 
   function stop(entry: Entry, why: NonNullable<Entry["why"]>) {
-    if (entry.stopping !== undefined || entry.result) return;
+    if (entry.result) return;
+    if (entry.stopping !== undefined) {
+      // 取消优先于超时和回执收尾，不重置宽限期，也不能在收尾时再启动修复。
+      if (why === "cancel" && entry.why !== "cancel") {
+        entry.why = why;
+        save(entry);
+      }
+      return;
+    }
     entry.stopping = now();
     entry.why = why;
     save(entry);
@@ -567,8 +579,32 @@ export function createWorker({
       tidied = now();
       tidy(tidied);
     }
-    await eachEntry(check);
+    // 登记后、启动前发生重启时，先核对 Hub；断联不能直接启动可能已被停止的任务。
+    const recovering = entries();
+    let recoveryChecked = true;
+    if (recovering.some((entry) => entry.turn === 0 && !entry.result)) {
+      try {
+        const answer = await hub.work({
+          claim,
+          wait: 0,
+          running: recovering.map((entry) => entry.run),
+          capacity: false,
+        });
+        for (const id of answer?.cancel ?? []) {
+          const entry = recovering.find((entry) => entry.run === id);
+          if (entry) stop(entry, "cancel");
+        }
+      } catch (error) {
+        log(`启动前无法核对停止请求：${error}`);
+        watchHub(false, now());
+        recoveryChecked = false;
+      }
+    }
+    await eachEntry(async (entry) => {
+      if (recoveryChecked || entry.turn > 0 || entry.why === "cancel") await check(entry);
+    });
     await eachEntry(settle);
+    if (!recoveryChecked) return false;
     const held = entries();
     let reachable = true;
     try {
@@ -584,7 +620,7 @@ export function createWorker({
       }
       if (answer?.job) {
         claim = randomUUID();
-        await start(answer.job);
+        await start(answer.job, (answer.cancel ?? []).includes(answer.job.run));
       }
     } catch (error) {
       log(`couldn't reach the hub: ${error}`);

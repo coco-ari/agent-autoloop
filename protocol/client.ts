@@ -1,5 +1,6 @@
 // A hub, from the outside: how a worker, a channel or the command line reaches it. Nothing here is more than an HTTP
 // request, which is the whole of what it takes to plug into the hub.
+import type { TaskInput } from "./task.ts";
 export class HubError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -30,6 +31,10 @@ export function hubClient(url: string, key: string) {
     return data;
   }
   return {
+    createTask: (body: TaskInput) => call("POST", "/v1/tasks", { body }),
+    task: (id: string) => call("GET", `/v1/tasks/${encodeURIComponent(id)}`),
+    taskEvent: (id: string, body: unknown) => call("POST", `/v1/tasks/${encodeURIComponent(id)}/events`, { body }),
+    stopTask: (id: string) => call("POST", `/v1/tasks/${encodeURIComponent(id)}/stop`, { body: {} }),
     // The worker's door.
     work({ claim, wait, running, capacity }: { claim: string; wait: number; running: number[]; capacity: boolean }) {
       const query = { claim, wait: String(wait), running: running.join(","), capacity: capacity ? "1" : "0" };

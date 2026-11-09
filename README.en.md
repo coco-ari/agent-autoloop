@@ -1,5 +1,7 @@
 # Agent Autoloop
 
+> This branch is a minimal fork adding [task identity and whole-task stopping](docs/task-control.md). Pin both the Hub and Worker to the same validated fork commit. The upstream installation instructions below do not install this branch. Task restart, deletion, and business-center UI integration are not included.
+
 **Let your command-line agents pick up work and follow it through in the background — staying quiet when they can handle it, and sending you a card only when a decision is yours to make.**
 
 [中文](README.md) | **English**

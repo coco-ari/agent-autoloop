@@ -92,7 +92,7 @@ export function openInScope(view: View, run: Row) {
   const source = sourceOf(view, run.id);
   if (!source || !run.claimed_at) return [];
   return rows(view, "cards", { state: "open", grp: run.grp, source }).filter(
-    (card) => card.created_at <= run.claimed_at,
+    (card) => card.created_at <= run.claimed_at && (card.task_id ?? null) === (run.task_id ?? null),
   );
 }
 
@@ -103,6 +103,7 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
   const when = { createdAt: card.created_at, decidedAt: card.decided_at, closedAt: card.closed_at };
   return {
     id,
+    ...(card.task_id && { taskId: card.task_id }),
     version,
     ref,
     kind,
@@ -180,9 +181,27 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
 }
 
 export function cancels(view: View, worker: string): number[] {
-  return rows(view, "runs", { state: "claimed" })
+  return rows(view, "runs", { state: ["claimed", "unknown"] })
     .filter((run) => run.cancel_at !== null && workerOf(view, run) === worker)
     .map((run) => run.id);
+}
+
+export function taskView(view: View, id: string) {
+  const task = view.get("tasks", id);
+  if (!task) return null;
+  const runs = rows(view, "runs", { task_id: id });
+  const pending = runs.filter((run) => run.state === "claimed" || run.state === "unknown").map((run) => run.id);
+  const state = !task.stop_requested_at ? "active" : pending.length ? "stopping" : "stopped";
+  return {
+    id,
+    project: task.project,
+    source: task.source,
+    state,
+    createdAt: task.created_at,
+    stopRequestedAt: task.stop_requested_at,
+    runs: runs.map((run) => run.id),
+    pendingRuns: pending,
+  };
 }
 
 export function unrouted(view: View, limit = 20) {
