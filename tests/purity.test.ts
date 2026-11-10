@@ -84,7 +84,8 @@ test("only evolve writes projections and only commit appends the log", () => {
     const text = readFileSync(join(root, file), "utf8");
     if (file !== "kernel/evolve.ts") assert.ok(!/\b(INSERT INTO|UPDATE|DELETE FROM) projections/.test(text), file);
     if (file !== "kernel/store.ts") assert.ok(!/\bINSERT INTO facts/.test(text), file);
-    assert.ok(!/\b(UPDATE|DELETE FROM) facts/.test(text), file);
+    // 显式删除只允许日志所属模块在原生事务内清理历史事实，其他入口不能改写。
+    if (file !== "kernel/store.ts") assert.ok(!/\b(UPDATE|DELETE FROM) facts/.test(text), file);
   }
   const store = readFileSync(join(root, "kernel/store.ts"), "utf8");
   assert.ok(!/INSERT INTO facts/.test(store.slice(0, store.indexOf("export function commit("))));

@@ -4,7 +4,7 @@ import { credential, digest, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
 import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
-import { iso, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
+import { TABLES, keyOf, iso, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
 import {
   agentsOf,
   cardView,
@@ -69,7 +69,7 @@ const DEFAULTS: Partial<Record<Table, Row>> = {
 
 type Given = { type: string; seq: number; now: number; at: string; env: Environment; rules: Rules };
 /** One input being decided: what holds throughout, and the view with its changes so far. */
-type Draft = Given & { view: View; changes: Change[] };
+type Draft = Given & { view: View; changes: Change[]; purgeTask?: string };
 
 export function decide(view: View, input: Input, now: number, env: Environment): { facts: Fact[]; value: any } {
   const { type, args } = input;
@@ -90,11 +90,17 @@ export function decide(view: View, input: Input, now: number, env: Environment):
   return { facts: draft.changes.length ? [factOf(draft, draft.changes)] : [], value };
 }
 
-function factOf({ seq, now, type }: Draft, changes: Change[]): Fact {
-  return { version: 1, seq, at: now, type, changes };
+function factOf({ seq, now, type, view, purgeTask }: Draft, changes: Change[]): Fact {
+  // 删除事实只留下各对象最终删除状态，不能夹带同一事务停止时的正文快照。
+  if (purgeTask) changes = [...new Map(changes.map((change) => [change.table + ":" + change.key, change])).values()];
+  return { version: 1, seq, at: now, type, changes, ...(purgeTask && { meta: { purgeTask, next: view.next } }) };
 }
 
 function set(draft: Draft, table: Table, key: string | number, row: Row | null) {
+  if (row && (table === "run_events" || table === "deliveries")) {
+    const parent = table === "run_events" ? draft.view.get("runs", row.run_id) : draft.view.get("cards", row.card_id);
+    if (parent?.task_id) row = { ...row, task_id: parent.task_id, task_attempt: parent.task_attempt };
+  }
   const change = { table, key: String(key), row };
   draft.changes.push(change);
   draft.view.set(table, String(key), row);
@@ -121,9 +127,15 @@ const threadOf = (run: Row) => ({
   rule: run.rule,
   lane: run.lane,
   grp: run.grp,
-  ...(run.task_id && { task_id: run.task_id }),
+  ...(run.task_id && { task_id: run.task_id, task_attempt: run.task_attempt }),
 });
-const stoppedTask = (draft: Draft, row: Row) => row.task_id && draft.view.get("tasks", row.task_id)?.stop_requested_at;
+const stoppedTask = (draft: Draft, row: Row) => {
+  if (!row.task_id) return false;
+  const task = draft.view.get("tasks", row.task_id);
+  return (
+    !task || task.deleted_at || task.delete_requested_at || task.stop_requested_at || task.attempt !== row.task_attempt
+  );
+};
 
 /** The session a round about to start goes on in. With resume, one that has none takes its thread's last, unless that round was
  * stopped: what stopped it, or the owner's reason, would meet this one too. Rounds on a thread can share a session, so another
@@ -189,10 +201,10 @@ const notify = (draft: Draft, key: string, title: string, text: string, extra: R
 
 /** A queued run of this rule and thread takes the event, so what comes in while it waits is handled together. */
 function enqueue(draft: Draft, rule: Rule, event: number, lane: string, resume?: string | null) {
-  const task_id = draft.view.get("events", event)?.task_id;
+  const { task_id, task_attempt } = draft.view.get("events", event)!;
   if (task_id) {
     if (draft.view.get("tasks", task_id)?.stop_requested_at) throw new Conflict("任务已经请求停止");
-    lane = `!task:${task_id}`;
+    lane = `!task:${task_id}:${task_attempt}`;
   }
   const rulesVersion = draft.view.get("config", "rules")!.version;
   const stamps = { not_before: draft.at, created_at: draft.at, rules_version: rulesVersion };
@@ -205,7 +217,7 @@ function enqueue(draft: Draft, rule: Rule, event: number, lane: string, resume?:
       lane,
       state: "queued",
       ...stamps,
-      ...(task_id && { task_id }),
+      ...(task_id && { task_id, task_attempt }),
     });
   put(draft, "run_events", `${run.id}:${event}`, { run_id: run.id, event_id: event });
   if (resume) put(draft, "runs", run.id, { resume });
@@ -222,11 +234,17 @@ function recordEvent(
   sent = false,
 ): number {
   let key = event.id;
-  for (let suffix = 1; rows(draft.view, "events", { source, key }).length; suffix++) {
+  for (
+    let suffix = 1;
+    rows(draft.view, "events", { source, key }).some(
+      (row) => !(event.task_id && row.task_id === event.task_id && row.task_attempt !== event.task_attempt),
+    );
+    suffix++
+  ) {
     key = `${event.id}:${suffix}`;
   }
   return add(draft, "events", {
-    ...(event.task_id && { task_id: event.task_id }),
+    ...(event.task_id && { task_id: event.task_id, task_attempt: event.task_attempt }),
     source,
     key,
     type: event.type,
@@ -246,13 +264,20 @@ function recordEvent(
 
 function ingest(draft: Draft, source: string, given: unknown, sent = false, task_id?: string) {
   const event = parseEvent(given);
+  const task_attempt = task_id ? draft.view.get("tasks", task_id)?.attempt : undefined;
   if (task_id) {
     if (draft.view.get("tasks", task_id)?.stop_requested_at) throw new Conflict("任务已经请求停止");
     event.subject = task_id;
   }
-  const existing = rows(draft.view, "events", { source, key: event.id })[0];
+  if (draft.view.get("event_tombstones", digest(JSON.stringify([source, event.id]))))
+    throw new Conflict("事件所属任务已删除");
+  const matches = rows(draft.view, "events", { source, key: event.id });
+  if (matches.some((row) => (row.task_id ?? null) !== (task_id ?? null)))
+    throw new Conflict("事件 ID 已属于其他任务或普通事件");
+  const existing = matches.find((row) => !task_id || row.task_attempt === task_attempt);
   if (existing) {
-    if ((existing.task_id ?? null) !== (task_id ?? null)) throw new Conflict("事件 ID 已属于其他任务或普通事件");
+    if ((existing.task_id ?? null) !== (task_id ?? null) || (task_id && existing.task_attempt !== task_attempt))
+      throw new Conflict("事件 ID 已属于其他任务或普通事件");
     return { event: existing.id, duplicate: true, ...routingOf(existing) };
   }
   const tooDeep = event.hops > MAX_HOPS;
@@ -266,14 +291,17 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, task
   const id = recordEvent(
     draft,
     source,
-    { ...event, ...(task_id && { task_id }) },
+    { ...event, ...(task_id && { task_id, task_attempt }) },
     matched.map((rule) => rule.name),
     paused,
     sent,
   );
   if (tooDeep) {
     const words = `同一条处理链已超过 ${MAX_HOPS} 层，后续事件已记录，没有继续派发。`;
-    notify(draft, `hops:${source}:${event.id}`, "事件循环已停止", words, { once: true });
+    notify(draft, `hops:${source}:${event.id}:${task_attempt ?? 0}`, "事件循环已停止", words, {
+      once: true,
+      ...(task_id && { task_id, task_attempt }),
+    });
   }
   for (const rule of taking) enqueue(draft, rule, id, rule.parallel ? event.subject : "");
   return { event: id, duplicate: false, routed: taking.map((rule) => rule.name), paused };
@@ -359,6 +387,17 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
   put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
+  if (run.task_id) {
+    const id = [run.task_id, worker, run.id, run.attempts + 1].join(":");
+    put(draft, "task_leases", id, {
+      id,
+      task_id: run.task_id,
+      worker,
+      run: run.id,
+      attempt: run.attempts + 1,
+      cleaned: false,
+    });
+  }
   return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env);
 }
 
@@ -433,7 +472,7 @@ function scheduleReview(draft: Draft, run: Row, later: Later) {
     about: later.about,
     session,
     hops: hopsOf(draft, run),
-    ...(run.task_id && { task_id: run.task_id }),
+    ...(run.task_id && { task_id: run.task_id, task_attempt: run.task_attempt }),
   };
   if (existing) return void put(draft, "timers", existing.id, fields);
   const source = sourceOf(draft.view, run.id) ?? SCHEDULE;
@@ -513,6 +552,7 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     });
     closeStopped(draft, id, "已核实结束");
     put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
+    if (run.task_id) finishDeletion(draft, run.task_id);
     return { rejected };
   }
   // Told to stop, one that failed first has stopped all the same: trying again would start what the owner ended.
@@ -565,7 +605,7 @@ function answer(draft: Draft, id: number, given: Row) {
     subject: card.task_id ?? subject,
     summary,
     hops,
-    ...(card.task_id && { task_id: card.task_id }),
+    ...(card.task_id && { task_id: card.task_id, task_attempt: card.task_attempt }),
   };
   const eventId = recordEvent(draft, card.source ?? SCHEDULE, event, rule ? [rule.name] : []);
   const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
@@ -637,7 +677,7 @@ function tick(draft: Draft) {
       type: "timer.due",
       subject: timer.task_id ?? timer.lane,
       hops: timer.hops ?? 0,
-      ...(timer.task_id && { task_id: timer.task_id }),
+      ...(timer.task_id && { task_id: timer.task_id, task_attempt: timer.task_attempt }),
     };
     const eventId = recordEvent(draft, timer.source, event, rule ? [rule.name] : []);
     put(draft, "timers", timer.id, { event_id: eventId });
@@ -724,6 +764,28 @@ const CONTROL = {
   },
 };
 
+function requireAttempt(task: Row, attempt: unknown, allowStopped = false) {
+  if (task.deleted_at || task.delete_requested_at) throw new Conflict("任务正在删除或已删除");
+  if (!Number.isSafeInteger(attempt) || attempt !== task.attempt) throw new Conflict("执行尝试已经变化");
+  if (!allowStopped && task.stop_requested_at) throw new Conflict("任务已经请求停止");
+}
+
+function finishDeletion(draft: Draft, id: string) {
+  const task = draft.view.get("tasks", id)!;
+  if (!task.delete_requested_at || task.deleted_at || taskView(draft.view, id)!.pendingRuns.length) return;
+  if (rows(draft.view, "task_leases", { task_id: id }).some((row) => !row.cleaned)) return;
+  for (const event of rows(draft.view, "events", { task_id: id })) {
+    const key = digest(JSON.stringify([event.source, event.key]));
+    put(draft, "event_tombstones", key, { id: key });
+  }
+  for (const table of TABLES) {
+    if (table === "tasks") continue;
+    for (const row of rows(draft.view, table, { task_id: id })) set(draft, table, keyOf(table, row), null);
+  }
+  set(draft, "tasks", id, { id, deleted_at: draft.at });
+  draft.purgeTask = id;
+}
+
 /** Every input there is, each with its arguments named. What one returns is what the caller is told. */
 const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   createTask(draft, given) {
@@ -731,6 +793,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     const hash = digest(JSON.stringify(input));
     const existing = draft.view.get("tasks", input.id);
     if (existing) {
+      if (existing.deleted_at || existing.delete_requested_at) throw new Conflict("任务正在删除或已删除");
       if (existing.input_hash !== hash) throw new Conflict("任务标识与原输入冲突");
       return taskView(draft.view, input.id);
     }
@@ -742,20 +805,30 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       input_hash: hash,
       created_at: draft.at,
       stop_requested_at: null,
+      attempt: 1,
+    });
+    put(draft, "task_attempts", `${input.id}:1`, {
+      id: `${input.id}:1`,
+      task_id: input.id,
+      attempt: 1,
+      stopped_at: null,
     });
     ingest(draft, input.source, input.event, false, input.id);
     return taskView(draft.view, input.id);
   },
-  taskEvent(draft, id, given) {
+  taskEvent(draft, id, given, attempt = 1) {
     const task = draft.view.get("tasks", taskIdentifier(id));
     if (!task) throw new NotFound("没有这个任务");
+    requireAttempt(task, attempt);
     return ingest(draft, task.source, taskEvent(id, given), false, id);
   },
-  stopTask(draft, id) {
+  stopTask(draft, id, attempt = 1) {
     const task = draft.view.get("tasks", taskIdentifier(id));
     if (!task) throw new NotFound("没有这个任务");
+    requireAttempt(task, attempt, true);
     if (task.stop_requested_at) return taskView(draft.view, id);
     put(draft, "tasks", id, { stop_requested_at: draft.at });
+    put(draft, "task_attempts", `${id}:${task.attempt}`, { stopped_at: draft.at });
     for (const run of rows(draft.view, "runs", { task_id: id })) {
       if (run.state === "queued") {
         put(draft, "runs", run.id, { state: "cancelled", finished_at: draft.at });
@@ -769,6 +842,57 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     }
     for (const timer of rows(draft.view, "timers", { task_id: id, event_id: null }))
       set(draft, "timers", timer.id, null);
+    return taskView(draft.view, id);
+  },
+  restartTask(draft, id, given) {
+    const task = draft.view.get("tasks", taskIdentifier(id));
+    if (!task) throw new NotFound("没有这个任务");
+    if (!given || typeof given !== "object" || Object.keys(given).sort().join() !== "attempt,event,request")
+      throw new InputError("重新执行只接受 request、attempt、event");
+    const request = taskIdentifier(given.request);
+    const event = taskEvent(id, given.event);
+    const hash = digest(JSON.stringify({ attempt: given.attempt, event }));
+    if (task.delete_requested_at || task.deleted_at) throw new Conflict("任务正在删除或已删除");
+    const existing = rows(draft.view, "task_attempts", { task_id: id, request })[0];
+    if (existing) {
+      if (existing.input_hash !== hash) throw new Conflict("重新执行请求冲突");
+      return { ...taskView(draft.view, id), acceptedAttempt: existing.attempt };
+    }
+    requireAttempt(task, given.attempt, true);
+    if (taskView(draft.view, id)?.state !== "stopped") throw new Conflict("必须先核实停止");
+    const attempt = task.attempt + 1;
+    put(draft, "task_attempts", id + ":" + attempt, {
+      id: id + ":" + attempt,
+      task_id: id,
+      attempt,
+      request,
+      input_hash: hash,
+      stopped_at: null,
+    });
+    put(draft, "tasks", id, { attempt, stop_requested_at: null });
+    ingest(draft, task.source, event, false, id);
+    return { ...taskView(draft.view, id), acceptedAttempt: attempt };
+  },
+  deleteTask(draft, id) {
+    const task = draft.view.get("tasks", taskIdentifier(id));
+    if (!task) throw new NotFound("没有这个任务");
+    if (task.deleted_at) return taskView(draft.view, id);
+    if (!task.delete_requested_at) {
+      HANDLERS.stopTask(draft, id, task.attempt);
+      put(draft, "tasks", id, { delete_requested_at: draft.at });
+    }
+    finishDeletion(draft, id);
+    return taskView(draft.view, id);
+  },
+  cleanupTask(draft, worker, id) {
+    const task = draft.view.get("tasks", taskIdentifier(id));
+    if (!task) throw new NotFound("没有这个任务");
+    if (task.deleted_at) return taskView(draft.view, id);
+    if (!task.delete_requested_at || taskView(draft.view, id)!.pendingRuns.length) throw new Conflict("尚未核实结束");
+    const leases = rows(draft.view, "task_leases", { task_id: id, worker });
+    if (!leases.length) throw new AuthError("没有属于此 Worker 的清理项");
+    for (const lease of leases) put(draft, "task_leases", lease.id, { cleaned: true });
+    finishDeletion(draft, id);
     return taskView(draft.view, id);
   },
   rules(draft, rules) {

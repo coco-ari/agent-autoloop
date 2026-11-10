@@ -33,8 +33,14 @@ export function hubClient(url: string, key: string) {
   return {
     createTask: (body: TaskInput) => call("POST", "/v1/tasks", { body }),
     task: (id: string) => call("GET", `/v1/tasks/${encodeURIComponent(id)}`),
-    taskEvent: (id: string, body: unknown) => call("POST", `/v1/tasks/${encodeURIComponent(id)}/events`, { body }),
-    stopTask: (id: string) => call("POST", `/v1/tasks/${encodeURIComponent(id)}/stop`, { body: {} }),
+    taskEvent: (id: string, event: unknown, attempt = 1) =>
+      call("POST", `/v1/tasks/${encodeURIComponent(id)}/events`, { body: { event, attempt } }),
+    stopTask: (id: string, attempt = 1) =>
+      call("POST", `/v1/tasks/${encodeURIComponent(id)}/stop`, { body: { attempt } }),
+    restartTask: (id: string, body: { request: string; attempt: number; event: unknown }) =>
+      call("POST", "/v1/tasks/" + encodeURIComponent(id) + "/restart", { body }),
+    deleteTask: (id: string) => call("DELETE", "/v1/tasks/" + encodeURIComponent(id)),
+    cleanupTask: (id: string) => call("POST", "/v1/tasks/" + encodeURIComponent(id) + "/cleanup", { body: {} }),
     // The worker's door.
     work({ claim, wait, running, capacity }: { claim: string; wait: number; running: number[]; capacity: boolean }) {
       const query = { claim, wait: String(wait), running: running.join(","), capacity: capacity ? "1" : "0" };

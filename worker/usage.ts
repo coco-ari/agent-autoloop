@@ -10,24 +10,29 @@ const DIRECTORY = path.join(HOME, "worker", "usage");
 const FIELDS = ["input", "output", "cached", "cost"] as const;
 
 // A session's name comes from the agent program, so it isn't used as a file name.
-const file = (adapter: string, session: string) => {
+export function taskUsageDirectory(task: string) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(task)) throw new Error("任务标识不正确");
+  return path.join(HOME, "worker", "task-usage", createHash("sha256").update(task).digest("hex"));
+}
+
+const file = (adapter: string, session: string, task?: string) => {
   const name = createHash("sha256")
     .update(JSON.stringify([adapter, session]))
     .digest("hex");
-  return path.join(DIRECTORY, `${name}.json`);
+  return path.join(task ? taskUsageDirectory(task) : DIRECTORY, `${name}.json`);
 };
 
-export function loadUsage(adapter: string, session: string): Usage | undefined {
+export function loadUsage(adapter: string, session: string, task?: string): Usage | undefined {
   try {
-    return JSON.parse(readFileSync(file(adapter, session), "utf8"));
+    return JSON.parse(readFileSync(file(adapter, session, task), "utf8"));
   } catch {
     return undefined;
   }
 }
 
-export function saveUsage(adapter: string, session: string, usage: Usage) {
-  mkdirSync(DIRECTORY, { recursive: true, mode: 0o700 });
-  const target = file(adapter, session);
+export function saveUsage(adapter: string, session: string, usage: Usage, task?: string) {
+  const target = file(adapter, session, task);
+  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   writeFileSync(`${target}.tmp`, JSON.stringify(usage), { mode: 0o600 });
   renameSync(`${target}.tmp`, target);
 }

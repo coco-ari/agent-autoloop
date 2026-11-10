@@ -9,6 +9,9 @@ export function replay(log: Fact[]): Snapshot {
   const tables = Object.fromEntries(
     [
       "tasks",
+      "task_attempts",
+      "task_leases",
+      "event_tombstones",
       "events",
       "runs",
       "run_events",
@@ -27,6 +30,8 @@ export function replay(log: Fact[]): Snapshot {
   let seq = 0;
   for (const fact of log) {
     seq = fact.seq;
+    for (const [table, value] of Object.entries(fact.meta?.next ?? {}))
+      next[table] = Math.max(next[table] ?? 0, Number(value));
     for (const { table, key, row } of fact.changes) {
       if (row === null) delete tables[table][key];
       else {
@@ -47,7 +52,11 @@ export function invariants(current: View, log: Fact[], before?: Snapshot) {
   const runs = rows(view, "runs");
   const cards = rows(view, "cards");
   const links = rows(view, "run_events");
-  assert.equal(new Set(events.map((e) => JSON.stringify([e.source, e.key]))).size, events.length, "重复事件");
+  assert.equal(
+    new Set(events.map((e) => JSON.stringify([e.source, e.key, e.task_id ?? null, e.task_attempt ?? null]))).size,
+    events.length,
+    "重复事件",
+  );
   const held = runs.filter((r) => r.state === "claimed");
   assert.equal(new Set(held.map((r) => JSON.stringify([r.grp, r.lane]))).size, held.length, "同一事项同时领了两轮");
   for (const group of new Set(held.map((r) => r.grp)))
@@ -79,16 +88,18 @@ export function invariants(current: View, log: Fact[], before?: Snapshot) {
         );
     }
   if (before) {
-    for (const e of rows(before, "events")) assert.deepEqual(view.tables.events[e.id], e, "已落盘事件被改了或丢了");
+    const deleted = (row: Row) => row.task_id && view.tables.tasks[row.task_id]?.deleted_at;
+    for (const e of rows(before, "events").filter((row) => !deleted(row)))
+      assert.deepEqual(view.tables.events[e.id], e, "已落盘事件被改了或丢了");
     for (const c of rows(before, "cards"))
-      if (c.answer_event !== null) {
+      if (!deleted(c) && c.answer_event !== null) {
         const now = view.tables.cards[c.id];
         assert.equal(now.answer_event, c.answer_event);
         assert.equal(now.choice, c.choice);
         assert.equal(now.answer, c.answer);
       }
     for (const r of rows(before, "runs"))
-      if (["done", "nothing", "cancelled"].includes(r.state))
+      if (!deleted(r) && ["done", "nothing", "cancelled"].includes(r.state))
         assert.deepEqual(view.tables.runs[r.id], r, "完成的回执再次生效");
   }
   if (log.length) assert.deepEqual(view.tables.due, deadlines(current, log.at(-1)!.at), "到期表和重算的不一样");

@@ -3,7 +3,7 @@ import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import type { Row, View } from "./evolve.ts";
-import { agentsOf, cancels, cardView, configuration, eventOutcome, taskView } from "./query.ts";
+import { agentsOf, cancels, cardView, configuration, eventOutcome, taskView, taskCleanups } from "./query.ts";
 import { isAsk } from "../protocol/validate.ts";
 
 export type Services = {
@@ -167,7 +167,9 @@ async function work(call: Call) {
     const wantsWork = !request.signal.aborted && url.searchParams.get("capacity") !== "0";
     const job = wantsWork ? act(call, "claimNext", worker, claim) : null;
     const cancel = cancels(services.view(), worker);
-    if (job || cancel.length || services.now() >= until || request.signal.aborted) return json({ job, cancel });
+    const cleanup = taskCleanups(services.view(), worker);
+    if (job || cancel.length || cleanup.length || services.now() >= until || request.signal.aborted)
+      return json({ job, cancel, ...(cleanup.length && { cleanup }) });
     await services.wait(until, request.signal);
   }
 }
@@ -283,9 +285,14 @@ async function route(call: Call): Promise<Response> {
     requireKey(call, "owner");
     return json(act(call, "createTask", await readJson(request)));
   }
-  const task = /^\/v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/(stop|events))?$/.exec(path);
-  if (task && (method === "GET" || method === "POST")) {
+  const task = /^\/v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/(stop|events|restart|cleanup))?$/.exec(path);
+  if (task && ["GET", "POST", "DELETE"].includes(method)) {
+    if (method === "POST" && task[2] === "cleanup")
+      return json(act(call, "cleanupTask", requireKey(call, "worker"), task[1]));
     requireKey(call, "owner");
+    if (method === "DELETE" && !task[2]) return json(act(call, "deleteTask", task[1]));
+    if (method === "POST" && task[2] === "restart")
+      return json(act(call, "restartTask", task[1], await readJson(request)));
     if (method === "GET" && !task[2]) {
       const found = taskView(services.view(), task[1]);
       if (!found) throw new NotFound("没有这个任务");
@@ -293,12 +300,16 @@ async function route(call: Call): Promise<Response> {
     }
     if (method === "POST" && task[2] === "stop") {
       const body = await readJson(request);
-      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length)
-        throw new InputError("停止请求只接受空对象");
-      return json(act(call, "stopTask", task[1]));
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).join() !== "attempt")
+        throw new InputError("停止请求只接受 attempt");
+      return json(act(call, "stopTask", task[1], body.attempt));
     }
-    if (method === "POST" && task[2] === "events")
-      return json(act(call, "taskEvent", task[1], await readJson(request)));
+    if (method === "POST" && task[2] === "events") {
+      const body = await readJson(request);
+      if (!body || Object.keys(body).sort().join() !== "attempt,event")
+        throw new InputError("追加事件只接受 attempt、event");
+      return json(act(call, "taskEvent", task[1], body.event, body.attempt));
+    }
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);

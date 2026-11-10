@@ -3,6 +3,9 @@ import { DatabaseSync, type StatementSync, type SQLInputValue } from "node:sqlit
 export type Row = Record<string, any>;
 export const TABLES = [
   "tasks",
+  "task_attempts",
+  "task_leases",
+  "event_tombstones",
   "events",
   "runs",
   "run_events",
@@ -55,6 +58,7 @@ export function statement(db: DatabaseSync, sql: string) {
 }
 export function initialize(db: DatabaseSync) {
   if (ready.has(db)) return;
+  db.exec("PRAGMA secure_delete=ON");
   db.exec(`CREATE TABLE IF NOT EXISTS facts(seq INTEGER PRIMARY KEY, fact TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS projections(collection TEXT,key TEXT,data TEXT NOT NULL,PRIMARY KEY(collection,key));
     CREATE TABLE IF NOT EXISTS projection_meta(id INTEGER PRIMARY KEY,seq INTEGER NOT NULL,next TEXT NOT NULL,format TEXT NOT NULL);
@@ -178,7 +182,7 @@ export class View {
   }
 }
 export function keyOf(table: Table, row: Row): string {
-  if (table === "tasks") return row.id;
+  if (["tasks", "task_attempts", "task_leases", "event_tombstones"].includes(table)) return String(row.id);
   if (NUMBERED.has(table)) return String(row.id);
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;
   if (table === "deliveries") return `${row.card_id}:${row.channel}`;
@@ -212,6 +216,8 @@ export function evolve(view: View, facts: Iterable<Fact>, db = view.db, reset = 
   const remove = statement(db, "DELETE FROM projections WHERE collection=? AND key=?");
   for (const fact of facts) {
     seq = fact.seq;
+    for (const [table, high] of Object.entries(fact.meta?.next ?? {}))
+      next[table] = Math.max(next[table] ?? 0, Number(high));
     const pending = new Map<string, Change>();
     for (const change of fact.changes) {
       pending.set(`${change.table}:${change.key}`, change);
@@ -261,4 +267,7 @@ export function snapshot(view: View) {
 }
 export const rows = (view: View, table: Table, match: Match = {}, limit?: number, reverse = false) =>
   view.select(table, match, limit, reverse);
+export function forgetReference(db: DatabaseSync, table: string, key: string) {
+  statement(db, "DELETE FROM projection_refs WHERE collection=? AND key=?").run(table, key);
+}
 export const iso = (ms: number) => new Date(ms).toISOString();

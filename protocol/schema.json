@@ -410,7 +410,9 @@
           "minLength": 1,
           "pattern": "\\S"
         },
-        "ask": { "$ref": "#/$defs/ask" }
+        "ask": {
+          "$ref": "#/$defs/ask"
+        }
       },
       "required": ["task", "ask"],
       "additionalProperties": false
@@ -559,6 +561,21 @@
           "items": {
             "type": "string"
           }
+        },
+        "task": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "attempt": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": ["id", "attempt"],
+          "additionalProperties": false
         }
       },
       "required": ["run", "token", "attempt", "rule", "agent", "session", "askFirst", "context"],
@@ -675,6 +692,38 @@
             "type": "integer",
             "minimum": 1
           }
+        },
+        "cleanup": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+              },
+              "runs": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "attempt": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": ["run", "attempt"],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": ["task", "runs"],
+            "additionalProperties": false
+          }
         }
       },
       "required": ["job", "cancel"],
@@ -713,27 +762,75 @@
       "description": "What became of an event, read with the key of the source that sent it.",
       "type": "object",
       "properties": {
-        "event": { "type": "integer", "minimum": 1 },
-        "routed": { "type": "array", "items": { "type": "string", "maxLength": 200 } },
-        "paused": { "type": "array", "items": { "type": "string", "maxLength": 200 } },
+        "event": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "routed": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "paused": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
         "runs": {
           "type": "array",
           "items": {
             "type": "object",
             "properties": {
-              "run": { "type": "integer", "minimum": 1 },
-              "rule": { "type": "string", "maxLength": 200 },
-              "state": { "enum": ["queued", "claimed", "unknown", "done", "nothing", "cancelled"] },
-              "attempts": { "type": "integer", "minimum": 0 },
-              "error": { "type": ["string", "null"] },
-              "finishedAt": { "anyOf": [{ "type": "null" }, { "type": "string", "format": "date-time" }] },
+              "run": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "rule": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "state": {
+                "enum": ["queued", "claimed", "unknown", "done", "nothing", "cancelled"]
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "error": {
+                "type": ["string", "null"]
+              },
+              "finishedAt": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                ]
+              },
               "summary": {
                 "description": "Null until it ends, and whenever the run also took another source's events.",
                 "type": ["string", "null"]
               },
               "events": {
                 "description": "What its receipt sent; null whenever the run also took another source's events.",
-                "anyOf": [{ "type": "null" }, { "type": "array", "items": { "$ref": "#/$defs/event" } }]
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/event"
+                    }
+                  }
+                ]
               }
             },
             "required": ["run", "rule", "state", "attempts", "error", "finishedAt", "summary", "events"],
@@ -813,6 +910,24 @@
             "required": ["table", "key", "row"],
             "additionalProperties": false
           }
+        },
+        "meta": {
+          "type": "object",
+          "properties": {
+            "purgeTask": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+            },
+            "next": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "required": ["purgeTask", "next"],
+          "additionalProperties": false
         }
       },
       "required": ["version", "seq", "at", "type", "changes"],

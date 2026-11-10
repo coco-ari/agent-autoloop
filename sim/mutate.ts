@@ -54,6 +54,9 @@ const edits: [string, string, string, string][] = [
   ["log-append", "store.ts", "for (const fact of facts) insert.run", "for (const fact of []) insert.run"],
   ["transaction-removed", "store.ts", "return transaction(db, () => {", "return ((work) => work())(() => {"],
   ["task-stop-intent", "decide.ts", "stop_requested_at: draft.at", "stop_requested_at: null"],
+  ["task-restart-attempt", "decide.ts", "attempt !== task.attempt", "false"],
+  ["task-delete-history", "store.ts", "if (fact.meta?.purgeTask)", "if (false)"],
+  ["task-delete-workers", "decide.ts", "some((row) => !row.cleaned)", "some((row) => false)"],
   ["task-late-receipt", "decide.ts", "if (stoppedTask(draft, run))", "if (false)"],
 ];
 const tests = [
@@ -68,6 +71,7 @@ const tests = [
   "http",
   "resume-thread",
   "task-stop",
+  "task-lifecycle",
 ].map((n) => `tests/${n}.test.ts`);
 export function mutate() {
   const root = join(import.meta.dirname, "..");

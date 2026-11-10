@@ -8,6 +8,8 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
+  lstatSync,
+  realpathSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -27,7 +29,7 @@ import type { Job } from "../protocol/job.ts";
 import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
-import { loadUsage, saveUsage, usageDelta } from "./usage.ts";
+import { loadUsage, saveUsage, usageDelta, taskUsageDirectory } from "./usage.ts";
 
 const RUNS = path.join(HOME, "worker", "runs");
 const NOTHING: Usage = { input: 0, output: 0, cached: 0, cost: 0 };
@@ -70,7 +72,7 @@ type Entry = {
   why?: "cancel" | "timeout" | "finished" | "adapter";
   result?: Result;
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "result">;
+export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "cleanupTask">>;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -91,7 +93,7 @@ function save(entry: Entry) {
 /** How far a launch took its session's total. One that didn't go on in that session started it from nothing. */
 function sessionRise(entry: Entry, { session, sessionUsage }: Reading) {
   if (!session || !sessionUsage) return;
-  saveUsage(entry.job.agent.use, session, sessionUsage);
+  saveUsage(entry.job.agent.use, session, sessionUsage, entry.job.task?.id);
   return usageDelta(sessionUsage, session === entry.resume ? entry.usageBaseline : NOTHING);
 }
 
@@ -215,9 +217,15 @@ export function createWorker({
 
   /** Starts a turn of the agent: a process that outlives this one, leaving its output and exit code in files. */
   function launch(entry: Entry, adapter: Adapter, prompt: string) {
+    if (entry.job.task)
+      writeFileSync(
+        path.join(entry.dir, "owner.json"),
+        JSON.stringify({ task: entry.job.task.id, run: entry.run, attempt: entry.attempt }),
+        { mode: 0o600 },
+      );
     entry.turn += 1;
     entry.launchedAt = now();
-    entry.usageBaseline = entry.resume ? loadUsage(entry.job.agent.use, entry.resume) : undefined;
+    entry.usageBaseline = entry.resume ? loadUsage(entry.job.agent.use, entry.resume, entry.job.task?.id) : undefined;
     delete entry.finishedAt;
     delete entry.pid;
     delete entry.stopping;
@@ -328,6 +336,12 @@ export function createWorker({
     };
     // Kept before anything slow: a worker stopped from here on still has the job.
     save(entry);
+    if (job.task)
+      writeFileSync(
+        path.join(dir, "owner.json"),
+        JSON.stringify({ task: job.task.id, run: job.run, attempt: job.attempt }),
+        { mode: 0o600 },
+      );
     if (cancelled) return endWith(entry, { outcome: "cancelled", summary: "启动前已停止" });
     try {
       writeFileSync(path.join(dir, "context.json"), JSON.stringify(job.context, null, 2), { mode: 0o600 });
@@ -536,6 +550,13 @@ export function createWorker({
       }
       log(`run ${entry.run}: the hub refused its result (${error.status}: ${error.message}); dropped`);
     }
+    // 恢复启动时可能尚未写入归属文件；交回结果后仍须留下清理所需的最小身份。
+    if (entry.job.task)
+      writeFileSync(
+        path.join(entry.dir, "owner.json"),
+        JSON.stringify({ task: entry.job.task.id, run: entry.run, attempt: entry.attempt }),
+        { mode: 0o600 },
+      );
     unlinkSync(path.join(entry.dir, "entry.json"));
   }
 
@@ -618,6 +639,13 @@ export function createWorker({
         const entry = held.find((entry) => entry.run === id);
         if (entry) stop(entry, "cancel");
       }
+      for (const request of answer?.cleanup ?? []) {
+        try {
+          await cleanup(request);
+        } catch (error) {
+          sayOnce(`任务清理尚未完成：${error}`);
+        }
+      }
       if (answer?.job) {
         claim = randomUUID();
         await start(answer.job, (answer.cancel ?? []).includes(answer.job.run));
@@ -628,6 +656,44 @@ export function createWorker({
     }
     watchHub(reachable, now());
     return reachable;
+  }
+
+  // 路径只由本机根目录与 Hub 的数字执行身份推导；拒绝符号链接，不跟随任意 cwd。
+  function ownedDirectory(root: string, leaf: string) {
+    const target = path.join(root, leaf);
+    let info;
+    try {
+      info = lstatSync(target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory() || path.dirname(realpathSync(target)) !== realpathSync(root))
+      throw new Error("清理路径不是本机所属目录");
+    if (lstatSync(root).isSymbolicLink()) throw new Error("清理根目录不能是符号链接");
+    return target;
+  }
+
+  async function cleanup(request: { task: string; runs: { run: number; attempt: number }[] }) {
+    if (!hub.cleanupTask) throw new Error("Hub 客户端未提供任务清理确认");
+    const usage = taskUsageDirectory(request.task);
+    for (const item of request.runs) {
+      if (!Number.isSafeInteger(item.run) || item.run < 1 || !Number.isSafeInteger(item.attempt) || item.attempt < 1)
+        throw new Error("清理执行身份不正确");
+      const dir = ownedDirectory(RUNS, `${item.run}-${item.attempt}`);
+      if (!dir) continue;
+      const owner = JSON.parse(readFileSync(path.join(dir, "owner.json"), "utf8"));
+      if (owner.task !== request.task || owner.run !== item.run || owner.attempt !== item.attempt)
+        throw new Error("清理目录的任务归属不匹配");
+      if (existsSync(path.join(dir, "entry.json"))) {
+        const entry: Entry = JSON.parse(readFileSync(path.join(dir, "entry.json"), "utf8"));
+        if ((await groupAlive(entry)) !== false) throw new Error("尚未核实本机进程结束");
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+    const ownUsage = ownedDirectory(path.dirname(usage), path.basename(usage));
+    if (ownUsage) rmSync(ownUsage, { recursive: true, force: true });
+    await hub.cleanupTask(request.task);
   }
 
   /** Output of finished runs is kept a while for looking into, then goes. */

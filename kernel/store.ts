@@ -1,7 +1,7 @@
 // The log and its expendable projection commit together. Only this module appends facts.
 import type { DatabaseSync } from "node:sqlite";
 import { Conflict } from "./errors.ts";
-import { evolve, initialize, statement, View, type Fact } from "./evolve.ts";
+import { evolve, forgetReference, initialize, statement, View, type Fact } from "./evolve.ts";
 
 export function* iterateLog(db: DatabaseSync, after = 0): Generator<Fact> {
   for (const row of db.prepare("SELECT fact FROM facts WHERE seq > ? ORDER BY seq").iterate(after))
@@ -37,8 +37,33 @@ export function commit(db: DatabaseSync, view: View, produce: () => Fact[]): Vie
     if (!facts.length) return view;
     const insert = statement(db, "INSERT INTO facts(seq,fact) VALUES (?,?)");
     for (const fact of facts) insert.run(fact.seq, JSON.stringify(fact));
-    return evolve(view, facts, db);
+    const next = evolve(view, facts, db);
+    for (const fact of facts) {
+      if (fact.meta?.purgeTask) eraseTaskHistory(db, String(fact.meta.purgeTask), fact.seq);
+    }
+    return next;
   });
+}
+
+// 只清理所属变更；同一事实中的其他任务和共享配置仍保留，序号及编号高水位不重排。
+function eraseTaskHistory(db: DatabaseSync, task: string, before: number) {
+  const owned = new Set<string>(["tasks:" + task]);
+  for (const fact of iterateLog(db)) {
+    if (fact.seq >= before) break;
+    for (const change of fact.changes) {
+      if (change.row?.task_id === task) owned.add(change.table + ":" + change.key);
+    }
+  }
+  const update = statement(db, "UPDATE facts SET fact=? WHERE seq=?");
+  for (const fact of iterateLog(db)) {
+    if (fact.seq >= before) break;
+    const changes = fact.changes.filter((change) => !owned.has(change.table + ":" + change.key));
+    if (changes.length !== fact.changes.length) update.run(JSON.stringify({ ...fact, changes }), fact.seq);
+  }
+  for (const identity of owned) {
+    const colon = identity.indexOf(":");
+    forgetReference(db, identity.slice(0, colon), identity.slice(colon + 1));
+  }
 }
 /** Reads the view holding the write lock: commands write to this database too, so one read before it can be stale. */
 export function commitLatest(db: DatabaseSync, format: string, produce: (view: View) => Fact[]): View {

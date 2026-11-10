@@ -92,7 +92,10 @@ export function openInScope(view: View, run: Row) {
   const source = sourceOf(view, run.id);
   if (!source || !run.claimed_at) return [];
   return rows(view, "cards", { state: "open", grp: run.grp, source }).filter(
-    (card) => card.created_at <= run.claimed_at && (card.task_id ?? null) === (run.task_id ?? null),
+    (card) =>
+      card.created_at <= run.claimed_at &&
+      (card.task_id ?? null) === (run.task_id ?? null) &&
+      (card.task_attempt ?? null) === (run.task_attempt ?? null),
   );
 }
 
@@ -138,6 +141,7 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
   const timerView = (timer: Row) => ({ key: timer.key, about: timer.about, at: timer.at });
   return {
     run: run.id,
+    ...(run.task_id && { task: { id: run.task_id, attempt: run.task_attempt } }),
     token: credential(env, "run", run.id, run.issued),
     attempt: run.attempts + 1,
     rule: { name, cwd, skill, prompt, emits },
@@ -189,11 +193,26 @@ export function cancels(view: View, worker: string): number[] {
 export function taskView(view: View, id: string) {
   const task = view.get("tasks", id);
   if (!task) return null;
+  if (task.deleted_at) return { id, state: "deleted", deletedAt: task.deleted_at, pendingRuns: [] };
   const runs = rows(view, "runs", { task_id: id });
   const pending = runs.filter((run) => run.state === "claimed" || run.state === "unknown").map((run) => run.id);
-  const state = !task.stop_requested_at ? "active" : pending.length ? "stopping" : "stopped";
+  const state = task.delete_requested_at
+    ? "deleting"
+    : !task.stop_requested_at
+      ? "active"
+      : pending.length
+        ? "stopping"
+        : "stopped";
   return {
     id,
+    attempt: task.attempt,
+    pendingWorkers: [
+      ...new Set(
+        rows(view, "task_leases", { task_id: id })
+          .filter((row) => !row.cleaned)
+          .map((row) => row.worker),
+      ),
+    ],
     project: task.project,
     source: task.source,
     state,
@@ -209,3 +228,14 @@ export function unrouted(view: View, limit = 20) {
 }
 
 export const safeFact = (fact: Fact) => ({ ...fact, changes: fact.changes.filter(({ table }) => table !== "keys") });
+
+export function taskCleanups(view: View, worker: string) {
+  return rows(view, "tasks")
+    .filter((task) => task.delete_requested_at && !taskView(view, task.id)!.pendingRuns.length)
+    .flatMap((task) => {
+      const leases = rows(view, "task_leases", { task_id: task.id, worker }).filter((row) => !row.cleaned);
+      return leases.length
+        ? [{ task: task.id, runs: leases.map((row) => ({ run: row.run, attempt: row.attempt })) }]
+        : [];
+    });
+}
