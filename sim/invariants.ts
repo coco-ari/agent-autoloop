@@ -14,6 +14,8 @@ export function replay(log: Fact[]): Snapshot {
       "event_tombstones",
       "events",
       "runs",
+      "run_outputs",
+      "run_output_heads",
       "run_events",
       "cards",
       "deliveries",

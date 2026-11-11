@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { decide } from "../kernel/decide.ts";
-import { empty, rows } from "../kernel/evolve.ts";
-import { commit, rebuild } from "../kernel/store.ts";
+import { empty, rows, snapshot } from "../kernel/evolve.ts";
+import { commit, rebuild, iterateLog } from "../kernel/store.ts";
 import { parseRules } from "../protocol/rules.ts";
+import { replay } from "../sim/invariants.ts";
 
 function fixture() {
   let view = empty();
@@ -17,6 +18,7 @@ function fixture() {
       value = result.value;
       return result.facts;
     });
+    assert.deepEqual(snapshot(view), replay([...iterateLog(view.db)]));
     return value;
   };
   act("rules", parseRules(readFileSync(new URL("./rules.fixture.json", import.meta.url), "utf8"), now, "UTC"));
