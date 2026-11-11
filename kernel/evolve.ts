@@ -8,6 +8,8 @@ export const TABLES = [
   "event_tombstones",
   "events",
   "runs",
+  "run_outputs",
+  "run_output_heads",
   "run_events",
   "cards",
   "deliveries",
@@ -23,9 +25,14 @@ export type Table = (typeof TABLES)[number];
 export type Change = { table: Table; key: string; row: Row | null };
 export type Fact = { version: 1; seq: number; at: number; type: string; changes: Change[]; meta?: Row };
 export type Match = Record<string, SQLInputValue | SQLInputValue[] | { not: null }>;
-const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers"]);
+const NUMBERED = new Set<Table>(["events", "runs", "cards", "timers", "run_outputs"]);
 const indexes: Partial<Record<Table, string[][]>> = {
   tasks: [["project"]],
+  run_outputs: [
+    ["run_id", "id"],
+    ["task_id", "id"],
+  ],
+  run_output_heads: [["run_id"], ["task_id"]],
   events: [["source", "key"], ["routed", "id"], ["paused", "id"], ["id"]],
   runs: [["state", "id"], ["rule", "lane", "state", "id"], ["id"], ["finished_at"], ["task_id", "state"]],
   run_events: [["run_id"], ["event_id"]],
@@ -182,7 +189,8 @@ export class View {
   }
 }
 export function keyOf(table: Table, row: Row): string {
-  if (["tasks", "task_attempts", "task_leases", "event_tombstones"].includes(table)) return String(row.id);
+  if (["tasks", "task_attempts", "task_leases", "event_tombstones", "run_output_heads"].includes(table))
+    return String(row.id);
   if (NUMBERED.has(table)) return String(row.id);
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;
   if (table === "deliveries") return `${row.card_id}:${row.channel}`;

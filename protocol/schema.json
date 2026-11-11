@@ -1077,6 +1077,33 @@
       },
       "required": ["card", "title", "choice", "at"],
       "additionalProperties": true
+    },
+    "outputChunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turn", "stream", "offset", "data", "complete"],
+      "properties": {
+        "turn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "stream": {
+          "enum": ["stdout", "stderr"]
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": {
+          "type": "string",
+          "maxLength": 87384,
+          "contentEncoding": "base64"
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }

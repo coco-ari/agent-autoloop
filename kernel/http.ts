@@ -3,7 +3,17 @@ import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import type { Row, View } from "./evolve.ts";
-import { agentsOf, cancels, cardView, configuration, eventOutcome, taskView, taskCleanups } from "./query.ts";
+import {
+  agentsOf,
+  cancels,
+  cardView,
+  configuration,
+  eventOutcome,
+  taskView,
+  taskDetails,
+  taskCleanups,
+  runOutput,
+} from "./query.ts";
 import { isAsk } from "../protocol/validate.ts";
 
 export type Services = {
@@ -285,11 +295,27 @@ async function route(call: Call): Promise<Response> {
     requireKey(call, "owner");
     return json(act(call, "createTask", await readJson(request)));
   }
-  const task = /^\/v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/(stop|events|restart|cleanup))?$/.exec(path);
+  if (method === "GET" && path === "/v1/tasks") {
+    requireKey(call, "owner");
+    const ids = new URL(request.url).searchParams.get("ids")?.split(",") ?? [];
+    if (!ids.length || ids.length > 50 || ids.some((id) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id)))
+      throw new InputError("一次读取 1–50 个任务标识");
+    const view = services.view();
+    return json({
+      items: [...new Set(ids)]
+        .filter((id) => view.get("tasks", id))
+        .map((id) => taskDetails(view, id, services.environment)),
+    });
+  }
+  const task = /^\/v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/(stop|events|restart|cleanup|details))?$/.exec(
+    path,
+  );
   if (task && ["GET", "POST", "DELETE"].includes(method)) {
     if (method === "POST" && task[2] === "cleanup")
       return json(act(call, "cleanupTask", requireKey(call, "worker"), task[1]));
     requireKey(call, "owner");
+    if (method === "GET" && task[2] === "details")
+      return json(taskDetails(services.view(), task[1], services.environment));
     if (method === "DELETE" && !task[2]) return json(act(call, "deleteTask", task[1]));
     if (method === "POST" && task[2] === "restart")
       return json(act(call, "restartTask", task[1], await readJson(request)));
@@ -313,8 +339,15 @@ async function route(call: Call): Promise<Response> {
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);
-  const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|result|cancel|why)$/.exec(path) ?? [];
+  const [, runPart, action] = /^\/v1\/runs\/([1-9][0-9]*)\/(started|result|cancel|why|output)$/.exec(path) ?? [];
   const runId = Number(runPart);
+  if (method === "GET" && action === "output") {
+    requireKey(call, "owner");
+    const after = Number(call.url.searchParams.get("after") ?? 0);
+    if (!Number.isSafeInteger(after) || after < 0) throw new InputError("输出游标不正确");
+    return json(runOutput(services.view(), runId, after));
+  }
+  if (method === "POST" && action === "output") return json(act(call, "output", runId, token, await readJson(request)));
   if (method === "GET" && action === "why") {
     requireKey(call, "owner");
     return json(services.why(runId));
