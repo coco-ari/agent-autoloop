@@ -26,6 +26,7 @@ import { HubError, type Hub } from "../protocol/client.ts";
 import { HOME } from "../host/home.ts";
 import { commandLine, processCommand } from "../host/command.ts";
 import type { Job } from "../protocol/job.ts";
+import { OUTPUT_CHUNK_BYTES, type OutputChunk } from "../protocol/output.ts";
 import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
@@ -71,8 +72,10 @@ type Entry = {
   stopping?: number;
   why?: "cancel" | "timeout" | "finished" | "adapter";
   result?: Result;
+  output?: Record<string, { offset: number; complete: boolean }>;
+  outputPending?: OutputChunk;
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "cleanupTask">>;
+export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "cleanupTask" | "output">>;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -198,6 +201,7 @@ export function createWorker({
   let tries = 0;
   let blind = false;
   let tidied = -Infinity;
+  let outputProgress = false;
   const said = new Set<string>();
   /** Trouble that lasts comes round every second, and once in the log will do. */
   const sayOnce = (line: string) => {
@@ -540,6 +544,7 @@ export function createWorker({
   /** Hands in what has ended. One the hub can't take now waits for next time; one it refuses is dropped and said so. */
   async function settle(entry: Entry) {
     if (!entry.result) return;
+    if (!outputReady(entry)) return;
     try {
       const answer = await hub.result(entry.run, entry.token, entry.result);
       for (const item of answer?.rejected ?? []) log(`run ${entry.run}: not applied: ${JSON.stringify(item)}`);
@@ -558,6 +563,65 @@ export function createWorker({
         { mode: 0o600 },
       );
     unlinkSync(path.join(entry.dir, "entry.json"));
+  }
+
+  function outputReady(entry: Entry) {
+    if (!entry.job.task || !hub.output) return true;
+    for (let turn = 1; turn <= entry.turn; turn++)
+      for (const stream of ["stdout", "stderr"]) if (!entry.output?.[`${turn}:${stream}`]?.complete) return false;
+    return true;
+  }
+
+  // 从已持久化原生日志补传，确认后才推进位置；取消领取与进程检查先于回传。
+  async function sendOutput(entry: Entry) {
+    if (!entry.job.task || !hub.output) return;
+    let budget = 2;
+    const send = async (body: OutputChunk) => {
+      entry.outputPending = body;
+      save(entry);
+      const answer = await hub.output!(entry.run, entry.token, body);
+      if (!answer || !Number.isSafeInteger(answer.offset) || typeof answer.complete !== "boolean")
+        throw new Error("输出确认格式不正确");
+      entry.output ??= {};
+      entry.output[`${body.turn}:${body.stream}`] = { offset: answer.offset, complete: answer.complete };
+      delete entry.outputPending;
+      save(entry);
+      budget--;
+      outputProgress = true;
+    };
+    // 未确认分段必须先按自己的通道补交，不能借用下一次遍历的通道位置。
+    if (entry.outputPending) await send(entry.outputPending);
+    for (let turn = 1; turn <= entry.turn; turn++) {
+      for (const stream of ["stdout", "stderr"] as const) {
+        const key = `${turn}:${stream}`;
+        const prior = entry.output?.[key] ?? { offset: 0, complete: false };
+        if (prior.complete) continue;
+        const file = path.join(entry.dir, `${stream}-${turn}.log`);
+        const size = existsSync(file) ? statSync(file).size : 0;
+        if (size < prior.offset) throw new Error("本机输出小于已确认位置，不能覆盖历史");
+        const closed = turn < entry.turn || Boolean(entry.result);
+        if (size === prior.offset && !closed) continue;
+        const data = Buffer.alloc(Math.min(OUTPUT_CHUNK_BYTES, size - prior.offset));
+        if (data.length) {
+          const fd = openSync(file, "r");
+          try {
+            readSync(fd, data, 0, data.length, prior.offset);
+          } finally {
+            closeSync(fd);
+          }
+        }
+        const body = {
+          turn,
+          stream,
+          offset: prior.offset,
+          data: data.toString("base64"),
+          complete: closed && prior.offset + data.length === size,
+        };
+        // 先保存原分段；应答丢失后即使文件继续增长，也重发相同字节而非扩大原分段。
+        await send(body);
+        if (budget === 0) return;
+      }
+    }
   }
 
   /** Nothing else can tell the owner when the hub is what's gone. */
@@ -628,10 +692,13 @@ export function createWorker({
     if (!recoveryChecked) return false;
     const held = entries();
     let reachable = true;
+    const drainOutput = outputProgress;
+    outputProgress = false;
     try {
       const answer = await hub.work({
         claim,
-        wait: held.length ? 1 : wait,
+        // 已结束进程的输出有界排空，不再每段等待一次空领取；网络失败仍沿原分段重试。
+        wait: drainOutput && held.some((entry) => entry.result) ? 0 : held.length ? 1 : wait,
         running: held.map((entry) => entry.run),
         capacity: held.length < capacity,
       });
@@ -655,6 +722,7 @@ export function createWorker({
       reachable = false;
     }
     watchHub(reachable, now());
+    await eachEntry(sendOutput);
     return reachable;
   }
 

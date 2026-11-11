@@ -1,6 +1,7 @@
 // A hub, from the outside: how a worker, a channel or the command line reaches it. Nothing here is more than an HTTP
 // request, which is the whole of what it takes to plug into the hub.
-import type { TaskInput } from "./task.ts";
+// @effect-diagnostics globalFetch:off -- 零依赖的原生 HTTP 客户端，供外部宿主直接复用。
+import type { TaskInput, OutputChunk } from "./task-client-types.ts";
 export class HubError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -33,6 +34,8 @@ export function hubClient(url: string, key: string) {
   return {
     createTask: (body: TaskInput) => call("POST", "/v1/tasks", { body }),
     task: (id: string) => call("GET", `/v1/tasks/${encodeURIComponent(id)}`),
+    taskDetails: (id: string) => call("GET", `/v1/tasks/${encodeURIComponent(id)}/details`),
+    taskList: (ids: string[]) => call("GET", `/v1/tasks?ids=${encodeURIComponent(ids.join(","))}`),
     taskEvent: (id: string, event: unknown, attempt = 1) =>
       call("POST", `/v1/tasks/${encodeURIComponent(id)}/events`, { body: { event, attempt } }),
     stopTask: (id: string, attempt = 1) =>
@@ -49,6 +52,9 @@ export function hubClient(url: string, key: string) {
     started: (run: number, token: string, body: { session?: string; link?: string }) =>
       call("POST", `/v1/runs/${run}/started`, { token, body }),
     result: (run: number, token: string, body: unknown) => call("POST", `/v1/runs/${run}/result`, { token, body }),
+    output: (run: number, token: string, body: OutputChunk) =>
+      call("POST", `/v1/runs/${run}/output`, { token, body, timeout: 2 }),
+    runOutput: (run: number, after = 0) => call("GET", `/v1/runs/${run}/output?after=${after}`),
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
     delivered: (card: number, version: number, ref: string | null) =>

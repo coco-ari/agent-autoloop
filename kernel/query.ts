@@ -1,6 +1,7 @@
 // Reading the view: what the decisions and the doors ask of it, and the shapes they hand out.
 import { credential, type Environment } from "./credentials.ts";
-import { rows, type Fact, type Row, type View } from "./evolve.ts";
+import { rows, statement, type Fact, type Row, type View } from "./evolve.ts";
+import { NotFound } from "./errors.ts";
 import { ruleOf, type Rule, type Rules } from "./rules.ts";
 import type { Job } from "../protocol/job.ts";
 
@@ -223,11 +224,53 @@ export function taskView(view: View, id: string) {
   };
 }
 
+export function taskDetails(view: View, id: string, env: Environment) {
+  const task = taskView(view, id);
+  if (!task) throw new NotFound("没有这个任务");
+  if (task.state === "deleted") return task;
+  return {
+    ...task,
+    executions: rows(view, "runs", { task_id: id }).map((run) => ({
+      id: run.id,
+      attempt: run.task_attempt,
+      executionAttempt: run.attempts,
+      rule: run.rule,
+      agent: run.agent,
+      state: run.state,
+      createdAt: run.created_at,
+      startedAt: run.claimed_at,
+      finishedAt: run.finished_at,
+      summary: run.summary,
+      error: run.error,
+    })),
+    cards: rows(view, "cards", { task_id: id, task_attempt: task.attempt }).map((card) => cardView(card, env)),
+    scheduled: rows(view, "timers", { task_id: id, task_attempt: task.attempt, event_id: null }).length,
+  };
+}
+
 export function unrouted(view: View, limit = 20) {
   return rows(view, "events", { routed: "[]" }, limit, true);
 }
 
-export const safeFact = (fact: Fact) => ({ ...fact, changes: fact.changes.filter(({ table }) => table !== "keys") });
+export const safeFact = (fact: Fact) => ({
+  ...fact,
+  changes: fact.changes
+    .filter(({ table }) => table !== "keys")
+    .map((change) =>
+      change.table === "run_outputs" && change.row ? { ...change, row: { ...change.row, data: undefined } } : change,
+    ),
+});
+
+// 状态流只通知输出变化；正文按轮次和游标读取，避免全局订阅广播全部日志。
+export function runOutput(view: View, run: number, after: number) {
+  if (!view.get("runs", run)) throw new NotFound("没有这一轮");
+  const rows = statement(
+    view.db,
+    "SELECT data FROM projections WHERE collection='run_outputs' AND json_extract(data,'$.run_id')=? AND json_extract(data,'$.id')>? ORDER BY json_extract(data,'$.id') LIMIT 17",
+  ).all(run, after);
+  const items = rows.slice(0, 16).map((row) => JSON.parse(String(row.data)));
+  return { items, next: items.at(-1)?.id ?? after, more: rows.length > 16 };
+}
 
 export function taskCleanups(view: View, worker: string) {
   return rows(view, "tasks")

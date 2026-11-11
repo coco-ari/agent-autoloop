@@ -21,6 +21,7 @@ import {
   taskView,
 } from "./query.ts";
 import { parseTask, taskEvent, taskIdentifier } from "../protocol/task.ts";
+import { OUTPUT_RUN_BYTES, parseOutput } from "../protocol/output.ts";
 import { cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
 import {
   addUsage,
@@ -789,12 +790,13 @@ function finishDeletion(draft: Draft, id: string) {
 /** Every input there is, each with its arguments named. What one returns is what the caller is told. */
 const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   createTask(draft, given) {
-    const input = parseTask(given);
+    const { stopped, ...input } = parseTask(given);
     const hash = digest(JSON.stringify(input));
     const existing = draft.view.get("tasks", input.id);
     if (existing) {
       if (existing.deleted_at || existing.delete_requested_at) throw new Conflict("任务正在删除或已删除");
       if (existing.input_hash !== hash) throw new Conflict("任务标识与原输入冲突");
+      if (stopped) return HANDLERS.stopTask(draft, input.id, 1);
       return taskView(draft.view, input.id);
     }
     if (!draft.rules.sources[input.source]) throw new InputError("没有这个来源");
@@ -814,6 +816,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       stopped_at: null,
     });
     ingest(draft, input.source, input.event, false, input.id);
+    if (stopped) return HANDLERS.stopTask(draft, input.id, 1);
     return taskView(draft.view, input.id);
   },
   taskEvent(draft, id, given, attempt = 1) {
@@ -949,6 +952,50 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     put(draft, "seen", `channel:${name}`, { kind: "channel", name, seen_at: draft.at });
   },
   claimNext,
+  output(draft, id, token, given) {
+    const run = heldRun(draft, id, token, ["claimed", "unknown"]);
+    const body = parseOutput(given);
+    const key = `${id}:${run.attempts}:${body.turn}:${body.stream}`;
+    const prior = draft.view.get("run_output_heads", key);
+    const hash = digest(JSON.stringify([body.turn, body.stream, body.offset, body.data, body.complete]));
+    if (prior?.hash === hash) return prior.ack;
+    if (prior?.complete || body.offset !== (prior?.offset ?? 0)) throw new Conflict("输出位置与已确认记录冲突");
+    const bytes = Buffer.from(body.data, "base64").length;
+    const total = rows(draft.view, "run_output_heads", { run_id: id })
+      .filter((row) => row.attempt === run.attempts)
+      .reduce((sum, row) => sum + row.offset, 0);
+    const truncated = total + bytes > OUTPUT_RUN_BYTES || Boolean(prior?.truncated);
+    const offset = body.offset + (truncated ? 0 : bytes);
+    const ack = { offset, complete: body.complete || truncated, truncated };
+    const owned = {
+      run_id: id,
+      attempt: run.attempts,
+      task_id: run.task_id ?? null,
+      task_attempt: run.task_attempt ?? null,
+    };
+    add(draft, "run_outputs", {
+      ...owned,
+      turn: body.turn,
+      stream: body.stream,
+      offset: body.offset,
+      data: truncated ? "" : body.data,
+      complete: ack.complete,
+      truncated,
+      at: draft.at,
+    });
+    put(draft, "run_output_heads", key, {
+      ...owned,
+      id: key,
+      turn: body.turn,
+      stream: body.stream,
+      offset,
+      complete: ack.complete,
+      truncated,
+      hash,
+      ack,
+    });
+    return ack;
+  },
   started(draft, id, token, given) {
     const { session, link } = given ?? {};
     for (const [field, value] of Object.entries({ session, link })) {
