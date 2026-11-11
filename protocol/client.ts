@@ -1,7 +1,7 @@
 // A hub, from the outside: how a worker, a channel or the command line reaches it. Nothing here is more than an HTTP
 // request, which is the whole of what it takes to plug into the hub.
 // @effect-diagnostics globalFetch:off -- 零依赖的原生 HTTP 客户端，供外部宿主直接复用。
-import type { TaskInput, OutputChunk } from "./task-client-types.ts";
+import type { TaskInput, OutputChunk, WorkspaceEvidence, WorkerReport } from "./task-client-types.ts";
 export class HubError extends Error {
   readonly status: number;
   constructor(status: number, message: string) {
@@ -32,6 +32,17 @@ export function hubClient(url: string, key: string) {
     return data;
   }
   return {
+    configuration: () => call("GET", "/v1/configuration"),
+    identity: () => call("GET", "/v1/identity"),
+    workers: () => call("GET", "/v1/workers"),
+    configureWorker: (name: string, settings: { name: string; capacity: number }) =>
+      call("PUT", `/v1/workers/${encodeURIComponent(name)}`, { body: settings }),
+    reportWorker: (report: WorkerReport) => call("POST", "/v1/worker/report", { body: report }),
+    checkConfiguration: (rules: unknown) => call("POST", "/v1/configuration/check", { body: { rules } }),
+    applyConfiguration: (revision: string, rules: unknown) =>
+      call("PUT", "/v1/configuration", { body: { revision, rules } }),
+    registerWorker: (name: string, workerKey: string) =>
+      call("PUT", `/v1/keys/worker/${encodeURIComponent(name)}`, { body: { key: workerKey } }),
     createTask: (body: TaskInput) => call("POST", "/v1/tasks", { body }),
     task: (id: string) => call("GET", `/v1/tasks/${encodeURIComponent(id)}`),
     taskDetails: (id: string) => call("GET", `/v1/tasks/${encodeURIComponent(id)}/details`),
@@ -55,13 +66,15 @@ export function hubClient(url: string, key: string) {
     output: (run: number, token: string, body: OutputChunk) =>
       call("POST", `/v1/runs/${run}/output`, { token, body, timeout: 2 }),
     runOutput: (run: number, after = 0) => call("GET", `/v1/runs/${run}/output?after=${after}`),
+    evidence: (run: number, token: string, body: WorkspaceEvidence) =>
+      call("POST", `/v1/runs/${run}/evidence`, { token, body }),
     // The channel's door.
     nextCard: (wait: number) => call("GET", `/v1/cards/next?wait=${wait}`, { timeout: wait + 30 }),
     delivered: (card: number, version: number, ref: string | null) =>
       call("POST", `/v1/cards/${card}/delivered`, { body: { version, ref } }),
     failed: (card: number, version: number, error: string) =>
       call("POST", `/v1/cards/${card}/failed`, { body: { version, error } }),
-    answer: (card: number, body: { choice?: number; text?: string; by?: string; ref?: string }) =>
+    answer: (card: number, body: { choice?: number; text?: string; by?: string; ref?: string; renewChain?: boolean }) =>
       call("POST", `/v1/cards/${card}/answer`, { body }),
     // Sources, the owner and tasks elsewhere.
     event: (body: unknown) => call("POST", "/v1/events", { body }),

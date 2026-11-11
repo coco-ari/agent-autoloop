@@ -82,6 +82,8 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     ["resume", (value) => typeof value === "boolean", "只能是 true 或 false", true],
     ["tell", (value) => TELLS.includes(value as string), `只能是 ${TELLS.join("、")}`, true],
     ["emits", isObject, "要是一个对象", true],
+    ["expected", isSomeWords, "要是互斥结果事件列表", true],
+    ["workspace", isObject, "要是任务目录配置", true],
     ["channels", isSomeWords, "要是通道编号的列表", true],
   ]);
   if (isObject(when) && "source" in when) {
@@ -106,6 +108,33 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
       ["source", emittable, `不是已登记的来源：${rule.emits.source}`],
       ["types", isTypes, "要是事件类型的列表"],
     ]);
+  }
+  if (
+    rule.expected &&
+    (!Array.isArray(rule.expected) ||
+      rule.expected.length > 10 ||
+      rule.expected.some((type) => !/^[a-z][a-z0-9_.-]{0,63}$/.test(type) || !rule.emits?.types.includes(type)))
+  )
+    issues.push(`${where}的 expected 必须是 emits 中明确的结果事件`);
+  if (isObject(rule.workspace)) {
+    checkFields(issues, `${where}的 workspace`, rule.workspace, [
+      ["root", isFolder, FOLDER],
+      ["ref", isText, NOT_EMPTY],
+      ["mode", (value) => ["develop", "review", "test"].includes(String(value)), "只能是 develop、review、test"],
+      ["passed", isText, NOT_EMPTY, true],
+      ["failed", isText, NOT_EMPTY, true],
+      ["reworkLimit", (value) => Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 3, "要是 0–3", true],
+    ]);
+    if (rule.workspace.mode === "review" && rules.agents[rule.to]?.access !== "read")
+      issues.push(`${where}的审核岗位必须只读`);
+    if (
+      rule.workspace.mode === "test" &&
+      (rules.agents[rule.to]?.use !== "command" ||
+        !rule.expected?.includes(rule.workspace.passed ?? "") ||
+        !rule.expected?.includes(rule.workspace.failed ?? "") ||
+        rule.workspace.passed === rule.workspace.failed)
+    )
+      issues.push(`${where}的测试需要 command 岗位和不同的通过／失败事件`);
   }
   for (const channel of isSomeWords(rule.channels) ? (rule.channels as string[]) : []) {
     if (!Object.hasOwn(rules.channels, channel)) issues.push(`${where}的 channels 不是已登记的通道：${channel}`);

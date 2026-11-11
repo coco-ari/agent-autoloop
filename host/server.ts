@@ -7,6 +7,7 @@ import { loadPlugin } from "./plugins.ts";
 import * as hub from "./runtime.ts";
 import { AuthError, NotFound } from "../kernel/errors.ts";
 import { createHandler } from "../kernel/http.ts";
+import { management } from "./management.ts";
 
 /** Past this setTimeout fires at once. */
 const LONGEST_TIMER = 2147483647;
@@ -109,6 +110,7 @@ export function makeHandler(commit = "dev") {
     if (file === basename(RULES_FILE)) fire();
   });
   const handle = createHandler({
+    management,
     commit,
     now: Date.now,
     view: hub.getView,

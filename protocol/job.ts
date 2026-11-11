@@ -4,7 +4,7 @@ export type Job = {
   task?: { id: string; attempt: number };
   token: string;
   attempt: number;
-  rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "emits">;
+  rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "emits" | "expected" | "workspace">;
   agent: {
     id: string;
     name: string;

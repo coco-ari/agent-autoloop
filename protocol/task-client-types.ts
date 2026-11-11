@@ -7,3 +7,16 @@ export type OutputChunk = {
   data: string;
   complete: boolean;
 };
+export type WorkspaceEvidence = {
+  directory: string;
+  base: string;
+  candidate: string;
+  mode: "develop" | "review" | "test";
+  command?: string[];
+  exitCode?: number;
+};
+export type WorkerReport = {
+  roots: string[];
+  programs: { use: string; problem: string | null }[];
+  repositories: { path: string; head: string }[];
+};

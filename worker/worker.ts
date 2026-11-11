@@ -31,6 +31,10 @@ import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
 import { loadUsage, saveUsage, usageDelta, taskUsageDirectory } from "./usage.ts";
+import { prepareWorkspace, captureWorkspace, cleanupWorkspaces, type PreparedWorkspace } from "./workspaces.ts";
+import type { WorkspaceEvidence } from "../protocol/workspace.ts";
+import { inspectWorker } from "./report.ts";
+import { handoff } from "./handoff.ts";
 
 const RUNS = path.join(HOME, "worker", "runs");
 const NOTHING: Usage = { input: 0, output: 0, cached: 0, cost: 0 };
@@ -74,8 +78,11 @@ type Entry = {
   result?: Result;
   output?: Record<string, { offset: number; complete: boolean }>;
   outputPending?: OutputChunk;
+  workspace?: PreparedWorkspace;
+  evidence?: WorkspaceEvidence;
 };
-export type WorkerHub = Pick<Hub, "work" | "started" | "result"> & Partial<Pick<Hub, "cleanupTask" | "output">>;
+export type WorkerHub = Pick<Hub, "work" | "started" | "result"> &
+  Partial<Pick<Hub, "cleanupTask" | "output" | "evidence" | "reportWorker">>;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -85,6 +92,7 @@ export type WorkerOptions = {
   unreachable?: string[];
   wait?: number;
   now?: () => number;
+  roots?: string[];
 };
 
 function save(entry: Entry) {
@@ -194,8 +202,10 @@ export function createWorker({
   unreachable,
   wait = WAIT,
   now = Date.now,
+  roots = [],
 }: WorkerOptions) {
   let claim = randomUUID();
+  let reportedAt = 0;
   let unreachableSince: number | null = null;
   let told = false;
   let tries = 0;
@@ -236,7 +246,25 @@ export function createWorker({
     delete entry.why;
     save(entry);
     const { rule, agent } = entry.job;
-    const cwd = rule.cwd.replace(/^~(?=[/\\])/, homedir());
+    if (rule.workspace && !entry.workspace) {
+      entry.workspace = prepareWorkspace(entry.job, roots);
+      save(entry);
+    }
+    if (entry.workspace?.requiresApproval)
+      return endWith(entry, {
+        outcome: "done",
+        session: entry.session,
+        ask: [
+          {
+            key: "task-rework-limit",
+            title: "自动返工次数已用完",
+            text: "审核或测试仍未通过，请核对打回理由后决定是否继续。",
+            options: ["继续修改", "补充要求后继续"],
+            about: "继续当前任务和原开发会话，先读最新打回理由，保留现有代码。",
+          },
+        ],
+      });
+    const cwd = entry.workspace?.directory ?? rule.cwd.replace(/^~(?=[/\\])/, homedir());
     const turn: Turn = {
       prompt,
       session: entry.session,
@@ -404,6 +432,35 @@ export function createWorker({
       if (entry.repairs) return discardReceipt(entry, adapter, error);
       return endWith(entry, { outcome: "failed", error, ...known, ...usage });
     }
+    if (entry.workspace?.mode === "test" && code !== null) {
+      try {
+        if (code === 126 || code === 127) throw new Error("测试命令无法启动，请核对本机程序和执行权限");
+        entry.evidence = { ...captureWorkspace(entry.workspace), command: entry.job.agent.command, exitCode: code };
+        const config = entry.job.rule.workspace!;
+        return endWith(
+          entry,
+          handoff(entry.job, {
+            outcome: "done",
+            summary: code === 0 ? "测试通过" : `测试未通过，退出码 ${code}`,
+            ...known,
+            ...usage,
+            events: [
+              {
+                id: `check-${entry.run}`,
+                type: (code === 0 ? config.passed : config.failed)!,
+                subject: entry.job.task!.id,
+                summary: code === 0 ? "测试通过" : "测试要求修改",
+                detail: (snapshot(files(entry).out) + "\n" + snapshot(files(entry).err)).slice(-3500),
+                link: "",
+                hops: 0,
+              },
+            ],
+          }),
+        );
+      } catch (error) {
+        return endWith(entry, { outcome: "failed", error: String(error).slice(0, 500), ...known, ...usage });
+      }
+    }
     if (seen.error !== undefined || !seen.text?.trim()) {
       const error = seen.error || "没留下结果";
       if (entry.repairs) return discardReceipt(entry, adapter, error);
@@ -423,9 +480,20 @@ export function createWorker({
       }
       return endWith(entry, { outcome: "failed", error: error.slice(0, 500), ...known, ...usage });
     }
-    const { result, problem } = resultFrom(readMessage(seen.text), { session, usage: entry.usage });
+    const receipt = resultFrom(readMessage(seen.text), { session, usage: entry.usage });
+    const problem = receipt.problem;
+    const result = handoff(entry.job, receipt.result);
     if (entry.repairs && !problem && result.outcome === "failed") return discardReceipt(entry, adapter, result.error!);
-    if (!problem) return endWith(entry, result);
+    if (!problem) {
+      if (entry.workspace && !result.ask?.length && ["done", "nothing"].includes(result.outcome)) {
+        try {
+          entry.evidence = captureWorkspace(entry.workspace);
+        } catch (error) {
+          return endWith(entry, { outcome: "failed", error: String(error).slice(0, 500), ...known, ...usage });
+        }
+      }
+      return endWith(entry, result);
+    }
     // Its work is done and only the receipt is wrong: it writes the receipt again, and does nothing again.
     if (entry.repairs < REPAIRS && seen.session) {
       log(`run ${entry.run}: receipt not readable (${problem}); asking again`);
@@ -546,6 +614,32 @@ export function createWorker({
     if (!entry.result) return;
     if (!outputReady(entry)) return;
     try {
+      if (entry.evidence) {
+        if (!hub.evidence) throw new Error("Hub 客户端不支持执行证据，不能确认完成");
+        try {
+          await hub.evidence(entry.run, entry.token, entry.evidence);
+        } catch (error) {
+          if (error instanceof HubError && [400, 409].includes(error.status)) {
+            entry.result = {
+              outcome: "done",
+              session: entry.result.session,
+              usage: entry.result.usage,
+              summary: "执行结束，证据需要核对",
+              ask: [
+                {
+                  key: "execution-evidence",
+                  title: "执行证据未被接受",
+                  text: "程序已经退出，结果证据未通过核对，未继续派发。请管理员检查执行节点和任务服务版本。",
+                  options: ["已修复，核对结果", "补充处理说明"],
+                  about: "先核实已完成工作，只补充结果证据，不自动重做业务。",
+                },
+              ],
+            };
+            delete entry.evidence;
+            save(entry);
+          } else if (!(error instanceof HubError && error.status === 401)) throw error;
+        }
+      }
       const answer = await hub.result(entry.run, entry.token, entry.result);
       for (const item of answer?.rejected ?? []) log(`run ${entry.run}: not applied: ${JSON.stringify(item)}`);
       log(`run ${entry.run}: ${entry.result.outcome}`);
@@ -659,6 +753,14 @@ export function createWorker({
 
   /** One round: look at what's in hand, hand in what's ended, come for more. Whether the hub could be reached. */
   async function tick() {
+    if (roots.length && hub.reportWorker && now() - reportedAt > 60000) {
+      try {
+        await hub.reportWorker(await inspectWorker(roots));
+        reportedAt = now();
+      } catch (error) {
+        log(`节点报告未送达：${error}`);
+      }
+    }
     // Here and not in run: whatever drives the worker comes through here.
     if (now() - tidied >= TIDY_EVERY) {
       tidied = now();
@@ -713,6 +815,8 @@ export function createWorker({
           sayOnce(`任务清理尚未完成：${error}`);
         }
       }
+      if (Number.isInteger(answer?.capacity) && answer.capacity >= 1 && answer.capacity <= 32)
+        capacity = answer.capacity;
       if (answer?.job) {
         claim = randomUUID();
         await start(answer.job, (answer.cancel ?? []).includes(answer.job.run));
@@ -761,6 +865,7 @@ export function createWorker({
     }
     const ownUsage = ownedDirectory(path.dirname(usage), path.basename(usage));
     if (ownUsage) rmSync(ownUsage, { recursive: true, force: true });
+    cleanupWorkspaces(request.task, roots);
     await hub.cleanupTask(request.task);
   }
 

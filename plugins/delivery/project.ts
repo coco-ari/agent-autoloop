@@ -1,6 +1,7 @@
-// A project's delivery settings and what they say about a release. The Ship action runs from a copy of this file in the
-// project, so it imports nothing beyond Node.
-import { execFileSync, spawnSync } from "node:child_process";
+// 项目交付设置及发布判断；独立 Action 验收同时携带共享的 Git 调用边界。
+import { spawnSync } from "node:child_process";
+import { git } from "../../host/git.ts";
+export { git } from "../../host/git.ts";
 
 export type Settings = {
   repo: string;
@@ -58,17 +59,6 @@ export function settings(value: any, testLocalHealth = false): Settings {
     review: { xhigh: [], status: "agent-review", ...review },
     ...(health && { health: { require: {}, ...health } }),
   };
-}
-
-export function git(root: string, ...args: string[]) {
-  const options = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.quotePath=false"];
-  return execFileSync("git", [...options, ...args], {
-    cwd: root,
-    encoding: "utf8",
-    timeout: 60000,
-    maxBuffer: 32 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
 }
 
 export function readMainSettings(root: string, testLocalHealth = false, ref = "origin/main") {

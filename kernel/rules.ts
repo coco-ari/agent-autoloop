@@ -9,7 +9,21 @@ export type Tell = "always" | "needed" | "never";
 type EventFilter = { source: string; types: string[] };
 type When = EventFilter | { cron: string };
 type RuleWords = { skill?: string; prompt?: string };
-type RuleOptions = RuleWords & { parallel?: number; resume?: boolean; emits?: EventFilter };
+export type TaskWorkspace = {
+  root: string;
+  ref: string;
+  mode: "develop" | "review" | "test";
+  passed?: string;
+  failed?: string;
+  reworkLimit?: number;
+};
+type RuleOptions = RuleWords & {
+  parallel?: number;
+  resume?: boolean;
+  emits?: EventFilter;
+  expected?: string[];
+  workspace?: TaskWorkspace;
+};
 /** Without channels a rule's cards reach every channel; with them, only those. */
 type Reach = { channels?: string[] };
 /** Without parallel a rule's group runs one at a time; with it, each subject is its own thread, that many at once. */

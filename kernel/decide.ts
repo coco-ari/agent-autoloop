@@ -22,6 +22,8 @@ import {
 } from "./query.ts";
 import { parseTask, taskEvent, taskIdentifier } from "../protocol/task.ts";
 import { OUTPUT_RUN_BYTES, parseOutput } from "../protocol/output.ts";
+import { parseEvidence } from "../protocol/workspace.ts";
+import { parseWorkerReport, parseWorkerSettings } from "../protocol/worker.ts";
 import { cronOf, eventRule, ruleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "./rules.ts";
 import {
   addUsage,
@@ -599,17 +601,27 @@ function answer(draft: Draft, id: number, given: Row) {
   const inRange = Number.isInteger(given.choice) && given.choice >= 0 && given.choice < optionCount;
   if (given.choice === undefined ? !text : !inRange) throw new InputError("没有这个选项");
   const rule = card.rule ? ruleNamed(draft, card.rule) : undefined;
+  const boundary = !!card.task_id && (card.hops ?? 0) >= MAX_HOPS;
+  if (given.renewChain !== undefined && (given.renewChain !== true || given.channel !== undefined || !boundary))
+    throw new InputError("只有本人能明确授权到达边界的任务继续自动接力");
+  if (boundary && given.renewChain !== true) throw new Conflict("此任务已到自动接力边界，需要明确授权继续一轮自动接力");
   const { lane: subject, title: summary, hops = 0 } = card;
   const event = {
     id: `card:${id}`,
     type: "card.answered",
     subject: card.task_id ?? subject,
     summary,
-    hops,
+    hops: given.renewChain === true ? 0 : hops,
     ...(card.task_id && { task_id: card.task_id, task_attempt: card.task_attempt }),
   };
   const eventId = recordEvent(draft, card.source ?? SCHEDULE, event, rule ? [rule.name] : []);
-  const decision = { choice: given.choice ?? null, answer: text, by: given.by ?? null, decided_at: draft.at };
+  const decision = {
+    choice: given.choice ?? null,
+    answer: text,
+    by: given.by ?? null,
+    decided_at: draft.at,
+    ...(given.renewChain === true && { renewed_chain: true }),
+  };
   put(draft, "cards", id, { state: "decided", ...decision, answer_event: eventId, version: card.version + 1 });
   if (rule) enqueue(draft, rule, eventId, card.lane, card.agent === rule.to ? card.session : null);
   return { changed: true, state: "decided" };
@@ -947,11 +959,36 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     put(draft, "seen", `worker:${worker}`, { kind: "worker", name: worker, seen_at: draft.at });
     for (const run of inHand) put(draft, "runs", run.id, { seen_at: draft.at });
   },
+  reportWorker(draft, worker, input) {
+    const report = parseWorkerReport(input);
+    put(draft, "seen", `worker:${worker}`, {
+      kind: "worker",
+      name: worker,
+      seen_at: draft.at,
+      report,
+      reported_at: draft.at,
+    });
+    return { ok: true };
+  },
+  configureWorker(draft, worker, input) {
+    if (!draft.view.get("keys", `worker:${worker}`)) throw new NotFound("节点尚未登记");
+    const settings = parseWorkerSettings(input);
+    put(draft, "config", `worker:${worker}`, settings);
+    return settings;
+  },
   channelSeen(draft, name) {
     if (justSeen(draft, draft.view.get("seen", `channel:${name}`))) return;
     put(draft, "seen", `channel:${name}`, { kind: "channel", name, seen_at: draft.at });
   },
   claimNext,
+  evidence(draft, id, token, given) {
+    const run = heldRun(draft, id, token, ["claimed", "unknown"]);
+    const evidence = parseEvidence(given);
+    if (run.evidence && JSON.stringify(run.evidence) !== JSON.stringify(evidence))
+      throw new Conflict("执行证据已经固定");
+    if (!run.evidence) put(draft, "runs", id, { evidence });
+    return { ok: true };
+  },
   output(draft, id, token, given) {
     const run = heldRun(draft, id, token, ["claimed", "unknown"]);
     const body = parseOutput(given);

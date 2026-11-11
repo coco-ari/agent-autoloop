@@ -1,5 +1,5 @@
 // The Ship step's question, as a GitHub Action: does this commit need releasing, and has main already moved past it?
-// Runs from a copy in the project, so it imports nothing beyond this folder's project.ts.
+// 独立验收副本同时包含 project.ts 和共享的 host/git.ts。
 import { appendFileSync } from "node:fs";
 import { git, liveRelease, readMainSettings, releaseRequired, type Live } from "./project.ts";
 

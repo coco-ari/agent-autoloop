@@ -68,6 +68,7 @@ export function eventOutcome(view: View, source: string, id: number) {
       return {
         run: run.id,
         rule: run.rule,
+        ...(run.evidence && { evidence: run.evidence }),
         state: run.state,
         attempts: run.attempts,
         error: run.error,
@@ -108,6 +109,10 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
   return {
     id,
     ...(card.task_id && { taskId: card.task_id }),
+    ...(card.task_id && {
+      canRenewChain: kind === "ask" && (card.hops ?? 0) >= 8,
+      renewedChain: card.renewed_chain === true,
+    }),
     version,
     ref,
     kind,
@@ -128,7 +133,7 @@ export function cardView(card: Row, env: Environment, ref: string | null = null,
 
 export function jobOf(view: View, run: Row, env: Environment): Job {
   const rules = configuration(view, run.rules_version);
-  const { name, cwd, skill, prompt, emits } = ruleOf(rules, run.rule)!;
+  const { name, cwd, skill, prompt, emits, expected, workspace } = ruleOf(rules, run.rule)!;
   const events = eventsOf(view, run.id);
   const eventIds = events.map((event) => event.id);
   const thread = { rule: run.rule, lane: run.lane };
@@ -145,7 +150,7 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     ...(run.task_id && { task: { id: run.task_id, attempt: run.task_attempt } }),
     token: credential(env, "run", run.id, run.issued),
     attempt: run.attempts + 1,
-    rule: { name, cwd, skill, prompt, emits },
+    rule: { name, cwd, skill, prompt, emits, ...(expected && { expected }), ...(workspace && { workspace }) },
     agent: { ...rules.agents[run.agent], id: run.agent },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
@@ -228,21 +233,58 @@ export function taskDetails(view: View, id: string, env: Environment) {
   const task = taskView(view, id);
   if (!task) throw new NotFound("没有这个任务");
   if (task.state === "deleted") return task;
+  const runs = rows(view, "runs", { task_id: id });
+  const events = new Map(rows(view, "events", { task_id: id }).map((event) => [event.id, event]));
+  const parents = new Map<number, number>();
+  for (const run of runs) {
+    for (const event of JSON.parse(run.emitted ?? "[]") as number[]) parents.set(event, run.id);
+  }
+  const eventView = (event: Row) => ({
+    id: event.id,
+    key: event.key,
+    source: event.source,
+    type: event.type,
+    subject: event.subject,
+    summary: event.summary,
+    detail: event.detail,
+    link: event.link,
+    receivedAt: event.received_at,
+    hops: event.hops ?? 0,
+    ...routingOf(event),
+  });
   return {
     ...task,
-    executions: rows(view, "runs", { task_id: id }).map((run) => ({
-      id: run.id,
-      attempt: run.task_attempt,
-      executionAttempt: run.attempts,
-      rule: run.rule,
-      agent: run.agent,
-      state: run.state,
-      createdAt: run.created_at,
-      startedAt: run.claimed_at,
-      finishedAt: run.finished_at,
-      summary: run.summary,
-      error: run.error,
-    })),
+    executions: runs.map((run) => {
+      // 历史岗位取领取配置，事件关系只在本任务的事实中连接，不按模型填写的资料猜测。
+      const agent = configuration(view, run.rules_version).agents[run.agent];
+      const inputs = eventsOf(view, run.id).map(eventView);
+      const emitted = (JSON.parse(run.emitted ?? "[]") as number[]).map((event) => eventView(events.get(event)!));
+      return {
+        id: run.id,
+        attempt: run.task_attempt,
+        executionAttempt: run.attempts,
+        ...(run.evidence && { evidence: run.evidence }),
+        rule: run.rule,
+        agent: run.agent,
+        agentName: agent?.name ?? run.agent,
+        worker: agent?.worker ?? null,
+        runtime: agent?.use ?? null,
+        model: agent?.model ?? null,
+        effort: agent?.effort ?? null,
+        session: run.session ?? null,
+        resume: run.resume ?? null,
+        state: run.state,
+        createdAt: run.created_at,
+        startedAt: run.claimed_at,
+        finishedAt: run.finished_at,
+        summary: run.summary,
+        error: run.error,
+        inputs,
+        events: emitted,
+        parents: [...new Set(inputs.flatMap((event) => (parents.has(event.id) ? [parents.get(event.id)!] : [])))],
+        rejected: JSON.parse(run.last_answer ?? "[]") as Array<{ what?: string; card?: number; reason: string }>,
+      };
+    }),
     cards: rows(view, "cards", { task_id: id, task_attempt: task.attempt }).map((card) => cardView(card, env)),
     scheduled: rows(view, "timers", { task_id: id, task_attempt: task.attempt, event_id: null }).length,
   };

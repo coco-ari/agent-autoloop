@@ -75,6 +75,8 @@ try {
   mkdirSync(action, { recursive: true });
   for (const name of ["action.yml", "action.ts", "project.ts"])
     cpSync(join(engine, "plugins/delivery", name), join(action, name));
+  mkdirSync(join(work, ".github/host"), { recursive: true });
+  cpSync(join(engine, "host/git.ts"), join(work, ".github/host/git.ts"));
   write(
     ".github/workflows/check.yml",
     `name: Check

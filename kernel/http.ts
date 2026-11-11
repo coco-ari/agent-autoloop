@@ -2,7 +2,7 @@
 import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
-import type { Row, View } from "./evolve.ts";
+import { rows, type Row, type View } from "./evolve.ts";
 import {
   agentsOf,
   cancels,
@@ -13,6 +13,7 @@ import {
   taskDetails,
   taskCleanups,
   runOutput,
+  workerOf,
 } from "./query.ts";
 import { isAsk } from "../protocol/validate.ts";
 
@@ -28,6 +29,13 @@ export type Services = {
   wait(until: number, signal: AbortSignal): Promise<void>;
   stream(after: number, signal: AbortSignal, key: string): ReadableStream;
   adapt(source: string, headers: Headers, body: string): Promise<unknown[]>;
+  management?: {
+    identity(): unknown;
+    read(): unknown;
+    check(input: unknown): unknown;
+    apply(input: unknown): unknown;
+    registerWorker(name: string, input: unknown): unknown;
+  };
 };
 
 const MAX_BODY = 1024 * 1024;
@@ -174,12 +182,19 @@ async function work(call: Call) {
   const until = waitUntil(call);
   for (;;) {
     if (!whose(services.view(), "worker", token)) throw new AuthError("密钥已失效");
-    const wantsWork = !request.signal.aborted && url.searchParams.get("capacity") !== "0";
+    const limit = services.view().get("config", `worker:${worker}`)?.capacity;
+    const held = rows(services.view(), "runs", { state: ["claimed", "unknown"] }).filter(
+      (run) => workerOf(services.view(), run) === worker,
+    );
+    const wantsWork =
+      !request.signal.aborted &&
+      url.searchParams.get("capacity") !== "0" &&
+      (limit === undefined || held.length < limit || held.some((run) => run.claim === claim));
     const job = wantsWork ? act(call, "claimNext", worker, claim) : null;
     const cancel = cancels(services.view(), worker);
     const cleanup = taskCleanups(services.view(), worker);
     if (job || cancel.length || cleanup.length || services.now() >= until || request.signal.aborted)
-      return json({ job, cancel, ...(cleanup.length && { cleanup }) });
+      return json({ job, cancel, ...(cleanup.length && { cleanup }), ...(limit !== undefined && { capacity: limit }) });
     await services.wait(until, request.signal);
   }
 }
@@ -210,7 +225,14 @@ async function cardAction(call: Call, id: number, action: string) {
   }
   if (action === "answer") {
     const who = channel ? { by: given?.by, ref: given?.ref, channel } : { by: "本人" };
-    return json(act(call, "answer", id, { choice: given?.choice, text: given?.text, ...who }));
+    return json(
+      act(call, "answer", id, {
+        choice: given?.choice,
+        text: given?.text,
+        ...(given?.renewChain !== undefined && { renewChain: given.renewChain }),
+        ...who,
+      }),
+    );
   }
   if (!Number.isInteger(given?.version)) throw new InputError("要说明是哪个版本");
   const ref = typeof given.ref === "string" ? given.ref : null;
@@ -265,8 +287,54 @@ async function route(call: Call): Promise<Response> {
   const { method } = request;
   const path = call.url.pathname;
   if (method === "GET" && path === "/healthz") return json({ ok: true, commit: services.commit });
+  if (method === "GET" && path === "/v1/identity") {
+    requireKey(call, "owner");
+    if (!services.management) throw new NotFound("当前宿主未提供实例身份");
+    return json(services.management.identity());
+  }
+  if (method === "POST" && path === "/v1/worker/report")
+    return json(act(call, "reportWorker", requireKey(call, "worker"), await readJson(request)));
+  if (method === "GET" && path === "/v1/workers") {
+    requireKey(call, "owner");
+    return json({
+      items: rows(services.view(), "keys", { kind: "worker" }).map((key) => {
+        const seen = services.view().get("seen", `worker:${key.name}`);
+        const settings = services.view().get("config", `worker:${key.name}`);
+        return {
+          id: key.name,
+          name: settings?.name ?? key.name,
+          capacity: settings?.capacity ?? null,
+          online: !!seen && services.now() - Date.parse(seen.seen_at) < 180000,
+          seenAt: seen?.seen_at ?? null,
+          reportedAt: seen?.reported_at ?? null,
+          report: seen?.report ?? null,
+        };
+      }),
+    });
+  }
+  const workerSettings = /^\/v1\/workers\/([a-z][a-z0-9-]{0,63})$/.exec(path);
+  if (method === "PUT" && workerSettings) {
+    requireKey(call, "owner");
+    return json(act(call, "configureWorker", workerSettings[1], await readJson(request)));
+  }
+  const evidence = /^\/v1\/runs\/([1-9][0-9]*)\/evidence$/.exec(path);
+  if (method === "POST" && evidence)
+    return json(act(call, "evidence", Number(evidence[1]), token, await readJson(request)));
+  if (path === "/v1/configuration" || path === "/v1/configuration/check") {
+    requireKey(call, "owner");
+    if (!services.management) throw new NotFound("当前宿主没有开放配置管理");
+    if (method === "GET" && path === "/v1/configuration") return json(services.management.read());
+    if (method === "POST" && path.endsWith("/check")) return json(services.management.check(await readJson(request)));
+    if (method === "PUT" && path === "/v1/configuration")
+      return json(services.management.apply(await readJson(request)));
+  }
   // A key's name is whatever `key new` was given; it only has to stay one path segment when encoded.
   const key = /^\/v1\/keys\/(source|worker|channel|owner)\/([^/]+)$/.exec(path);
+  if (method === "PUT" && key?.[1] === "worker") {
+    requireKey(call, "owner");
+    if (!services.management) throw new NotFound("当前宿主没有开放节点登记");
+    return json(services.management.registerWorker(key[2], await readJson(request)));
+  }
   if (method === "DELETE" && key) {
     requireKey(call, "owner");
     let name: string;

@@ -9,7 +9,7 @@ export type ChannelConfig = { use?: string; key: string; [option: string]: unkno
 export type Config = {
   url: string;
   hub?: { listen: string; publicUrl?: string };
-  worker?: { name: string; key: string; capacity?: number; unreachable?: string[] };
+  worker?: { name: string; key: string; capacity?: number; unreachable?: string[]; roots?: string[] };
   channels?: Record<string, ChannelConfig>;
   source?: { name: string; key: string };
   owner?: string;
