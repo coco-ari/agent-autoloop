@@ -122,6 +122,8 @@ test("开发、独立审核、测试退回和续接沿真实事件关联，其�
       events: [{ id: "one:ready", type: "development.ready", subject: "other", detail: "候选代码已就绪" }],
     });
     const review = h.act("claimNext", "review", "review-one");
+    assert.equal(review.context.taskRequest.original.detail, "需求-one");
+    assert.deepEqual(review.context.taskRequest.changes, []);
     h.create("other");
     const other = h.act("claimNext", "development", "dev-other");
     h.act("finish", other.run, other.token, { outcome: "done", session: "session-other", summary: "另一项任务" });
@@ -136,6 +138,8 @@ test("开发、独立审核、测试退回和续接沿真实事件关联，其�
       events: [{ id: "one:test-failed", type: "test.failed", summary: "退款金额用例不通过" }],
     });
     const rework = h.act("claimNext", "development", "rework-one");
+    assert.equal(rework.context.taskRequest.original.detail, "需求-one");
+    assert.deepEqual(rework.context.taskRequest.changes, [], "模型结果不能冒充人工修改");
     assert.equal(rework.session, "session-one");
     h.act("started", rework.run, rework.token, { session: "session-one" });
     const details = h.details("one");
@@ -159,6 +163,44 @@ test("开发、独立审核、测试退回和续接沿真实事件关联，其�
     assert.deepEqual(h.details("one"), details);
     assert.ok(!JSON.stringify(details).includes("session-other"));
     assert.ok(!JSON.stringify(details).includes(development.token));
+  } finally {
+    h.close();
+  }
+});
+
+test("人工修改按本轮输入固定，审核重领不混入未来要求，重跑使用新尝试需求", () => {
+  const h = fixture();
+  try {
+    h.create("one");
+    const development = h.act("claimNext", "development", "initial");
+    h.act("finish", development.run, development.token, {
+      outcome: "done",
+      events: [{ id: "ready", type: "development.ready" }],
+    });
+    const review = h.act("claimNext", "review", "reading");
+    h.act("taskEvent", "one", { id: "human-change", type: "task.created", detail: "另外支持退款" }, 1);
+    const repeated = h.act("claimNext", "review", "reading");
+    assert.deepEqual(repeated.context.taskRequest, review.context.taskRequest);
+    const changed = h.act("claimNext", "development", "change");
+    assert.deepEqual(changed.context.taskRequest, {
+      original: { summary: "", detail: "需求-one" },
+      changes: [{ summary: "", detail: "另外支持退款" }],
+      earlierChanges: 0,
+    });
+    h.act("stopTask", "one", 1);
+    h.act("finish", repeated.run, repeated.token, { outcome: "failed", error: "已停止" });
+    h.act("finish", changed.run, changed.token, { outcome: "failed", error: "已停止" });
+    h.act("restartTask", "one", {
+      request: "new-attempt",
+      attempt: 1,
+      event: { id: "restarted", type: "task.created", detail: "新尝试需求" },
+    });
+    const restarted = h.act("claimNext", "development", "restarted");
+    assert.deepEqual(restarted.context.taskRequest, {
+      original: { summary: "", detail: "新尝试需求" },
+      changes: [],
+      earlierChanges: 0,
+    });
   } finally {
     h.close();
   }

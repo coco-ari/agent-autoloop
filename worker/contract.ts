@@ -51,6 +51,11 @@ export function promptFor(job: Job, contextFile: string) {
     ...(context.answers.length
       ? ["这一轮是来接着做回答过的决定（answers）：先读它的 about，核实当前事实，再接着做。"]
       : []),
+    ...(context.taskRequest
+      ? [
+          "taskRequest.original 是本次任务的原始需求，changes 是人工追加的修改要求；独立核对这些资料与候选代码，不只相信上一岗位的结论。earlierChanges 大于零时有更早修改未展开，背景不足应提问。",
+        ]
+      : []),
     ...(context.timers.length ? ["这一轮有到期的复查（timers）：读它的 about，到原处核实。"] : []),
     "",
     "怎么结束这一轮：",

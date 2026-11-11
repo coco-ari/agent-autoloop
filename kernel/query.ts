@@ -145,6 +145,13 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     .sort((a, b) => b.id - a.id)
     .slice(0, 20);
   const timerView = (timer: Row) => ({ key: timer.key, about: timer.about, at: timer.at });
+  // 原始需求和人工修改由本人接口记录，按本轮输入截断，不能用模型摘要替代或混入后来的要求。
+  const requests = run.task_id
+    ? rows(view, "events", { task_id: run.task_id, task_attempt: run.task_attempt, requested: 1 }).filter(
+        (event) => event.id <= Math.max(0, ...eventIds),
+      )
+    : [];
+  const requestView = (event: Row) => ({ summary: event.summary, detail: event.detail });
   return {
     run: run.id,
     ...(run.task_id && { task: { id: run.task_id, attempt: run.task_attempt } }),
@@ -155,6 +162,13 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
     context: {
+      ...(requests.length && {
+        taskRequest: {
+          original: requestView(requests[0]),
+          changes: requests.slice(1).slice(-20).map(requestView),
+          earlierChanges: Math.max(0, requests.length - 21),
+        },
+      }),
       events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
         const sourceName = rules.sources[source]?.name ?? source;
         return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0 };

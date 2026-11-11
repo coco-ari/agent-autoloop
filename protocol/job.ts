@@ -19,6 +19,11 @@ export type Job = {
   session: string | null;
   askFirst: string[];
   context: {
+    taskRequest?: {
+      original: { summary: string; detail: string };
+      changes: { summary: string; detail: string }[];
+      earlierChanges: number;
+    };
     events: {
       id: string;
       source: string;

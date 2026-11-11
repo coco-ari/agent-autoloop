@@ -827,7 +827,8 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       attempt: 1,
       stopped_at: null,
     });
-    ingest(draft, input.source, input.event, false, input.id);
+    const created = ingest(draft, input.source, input.event, false, input.id);
+    put(draft, "events", created.event, { requested: 1 });
     if (stopped) return HANDLERS.stopTask(draft, input.id, 1);
     return taskView(draft.view, input.id);
   },
@@ -835,7 +836,9 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     const task = draft.view.get("tasks", taskIdentifier(id));
     if (!task) throw new NotFound("没有这个任务");
     requireAttempt(task, attempt);
-    return ingest(draft, task.source, taskEvent(id, given), false, id);
+    const accepted = ingest(draft, task.source, taskEvent(id, given), false, id);
+    if (!accepted.duplicate) put(draft, "events", accepted.event, { requested: 1 });
+    return accepted;
   },
   stopTask(draft, id, attempt = 1) {
     const task = draft.view.get("tasks", taskIdentifier(id));
@@ -885,7 +888,8 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       stopped_at: null,
     });
     put(draft, "tasks", id, { attempt, stop_requested_at: null });
-    ingest(draft, task.source, event, false, id);
+    const restarted = ingest(draft, task.source, event, false, id);
+    put(draft, "events", restarted.event, { requested: 1 });
     return { ...taskView(draft.view, id), acceptedAttempt: attempt };
   },
   deleteTask(draft, id) {
