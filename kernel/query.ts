@@ -164,6 +164,7 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     context: {
       ...(requests.length && {
         taskRequest: {
+          explicit: requests.some((event) => eventIds.includes(event.id)),
           original: requestView(requests[0]),
           changes: requests.slice(1).slice(-20).map(requestView),
           earlierChanges: Math.max(0, requests.length - 21),

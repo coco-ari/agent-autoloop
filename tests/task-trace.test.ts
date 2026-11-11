@@ -123,6 +123,7 @@ test("开发、独立审核、测试退回和续接沿真实事件关联，其�
     });
     const review = h.act("claimNext", "review", "review-one");
     assert.equal(review.context.taskRequest.original.detail, "需求-one");
+    assert.equal(review.context.taskRequest.explicit, false);
     assert.deepEqual(review.context.taskRequest.changes, []);
     h.create("other");
     const other = h.act("claimNext", "development", "dev-other");
@@ -183,6 +184,7 @@ test("人工修改按本轮输入固定，审核重领不混入未来要求，�
     assert.deepEqual(repeated.context.taskRequest, review.context.taskRequest);
     const changed = h.act("claimNext", "development", "change");
     assert.deepEqual(changed.context.taskRequest, {
+      explicit: true,
       original: { summary: "", detail: "需求-one" },
       changes: [{ summary: "", detail: "另外支持退款" }],
       earlierChanges: 0,
@@ -197,6 +199,7 @@ test("人工修改按本轮输入固定，审核重领不混入未来要求，�
     });
     const restarted = h.act("claimNext", "development", "restarted");
     assert.deepEqual(restarted.context.taskRequest, {
+      explicit: true,
       original: { summary: "", detail: "新尝试需求" },
       changes: [],
       earlierChanges: 0,

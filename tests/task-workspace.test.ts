@@ -54,3 +54,22 @@ test("各任务独占 worktree，审核和测试核对固定候选，清理不�
   assert.equal(readFileSync(join(repository, "sum.js"), "utf8").includes("Number"), false);
   cleanupWorkspaces("two", [approved]);
 });
+
+test("主动要求修改不重复询问次数授权，旧人工要求不能放开后续自动返工", () => {
+  const initial = job("manual-rework", "develop");
+  initial.rule.workspace!.reworkLimit = 0;
+  captureWorkspace(prepareWorkspace(initial, [approved])!);
+  const next = job("manual-rework", "develop", 2);
+  next.rule.workspace!.reworkLimit = 0;
+  assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, true);
+  next.context.taskRequest = {
+    explicit: true,
+    original: { summary: "", detail: "需求" },
+    changes: [],
+    earlierChanges: 0,
+  };
+  assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, false);
+  next.context.taskRequest.explicit = false;
+  assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, true);
+  cleanupWorkspaces("manual-rework", [approved]);
+});

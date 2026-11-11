@@ -20,6 +20,7 @@ export type Job = {
   askFirst: string[];
   context: {
     taskRequest?: {
+      explicit: boolean;
       original: { summary: string; detail: string };
       changes: { summary: string; detail: string }[];
       earlierChanges: number;

@@ -133,7 +133,8 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
     config.reworkLimit !== undefined &&
     (value.developments?.length ?? 0) > config.reworkLimit &&
     !value.developments?.includes(job.run) &&
-    !job.context.answers.length;
+    !job.context.answers.length &&
+    !job.context.taskRequest?.explicit;
   return { ...value, mode: config.mode, directory: cwd, worktree: directory, run: job.run, requiresApproval };
 }
 
