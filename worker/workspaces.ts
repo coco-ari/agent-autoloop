@@ -94,6 +94,8 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
       directory,
       base: git(repository, "rev-parse", "--verify", `${config.ref}^{commit}`),
     };
+    // 审核或检查也可直接成为入口，首轮以固定基准作为候选，不依赖虚构的开发步骤。
+    if (config.mode !== "develop") value.candidate = value.base;
     values.push(value);
     save(job.task.id, values);
   }
@@ -116,14 +118,17 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
       cwd = path.join(parent, "review-" + job.run);
       approved(cwd, roots);
       mkdirSync(cwd, { recursive: true, mode: 0o700 });
+      // 直接审阅基准时，用空树差异提供固定提交的文本内容，仍不检出或执行仓库配置。
+      const scope = value.candidate === value.base ? "repository" : "changes";
+      const reviewBase = scope === "repository" ? git(repository, "mktree") : value.base;
       writeFileSync(
         path.join(cwd, "changes.txt"),
-        git(repository, "diff", "--no-ext-diff", "--no-textconv", value.base, value.candidate, "--"),
+        git(repository, "diff", "--no-ext-diff", "--no-textconv", reviewBase, value.candidate, "--"),
         { mode: 0o600 },
       );
       writeFileSync(
         path.join(cwd, "candidate.json"),
-        JSON.stringify({ base: value.base, candidate: value.candidate }),
+        JSON.stringify({ base: value.base, candidate: value.candidate, scope }),
         { mode: 0o600 },
       );
     }

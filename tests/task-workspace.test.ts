@@ -29,6 +29,22 @@ const job = (id: string, mode: "develop" | "review" | "test", run = 1): Job => (
   agent: { id: mode, name: mode, use: "command", access: mode === "review" ? "read" : "edit" },
   context: { events: [], answers: [], timers: [], waiting: [], open: [], decided: [] },
 });
+
+test("审核或检查可以直接作为入口，固定基准候选并保留编辑隔离", () => {
+  const review = prepareWorkspace(job("review-entry", "review"), [approved])!;
+  assert.equal(review.candidate, review.base);
+  assert.equal(captureWorkspace(review).candidate, review.base);
+  assert.ok(existsSync(join(review.directory, "changes.txt")));
+  assert.match(readFileSync(join(review.directory, "changes.txt"), "utf8"), /export const sum/);
+  assert.equal(JSON.parse(readFileSync(join(review.directory, "candidate.json"), "utf8")).scope, "repository");
+  assert.equal(existsSync(join(review.directory, "sum.js")), false);
+  const checked = prepareWorkspace(job("test-entry", "test"), [approved])!;
+  assert.equal(checked.candidate, checked.base);
+  writeFileSync(join(checked.directory, "sum.js"), "unexpected edit");
+  assert.throws(() => captureWorkspace(checked), /修改|变化|改变/);
+  cleanupWorkspaces("review-entry", [approved]);
+  cleanupWorkspaces("test-entry", [approved]);
+});
 test("各任务独占 worktree，审核和测试核对固定候选，清理不删原仓库", () => {
   const first = prepareWorkspace(job("one", "develop"), [approved])!;
   const second = prepareWorkspace(job("two", "develop"), [approved])!;

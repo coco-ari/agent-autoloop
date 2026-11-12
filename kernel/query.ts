@@ -254,6 +254,31 @@ export function taskDetails(view: View, id: string, env: Environment) {
   for (const run of runs) {
     for (const event of JSON.parse(run.emitted ?? "[]") as number[]) parents.set(event, run.id);
   }
+  const byRun = new Map(runs.map((run) => [run.id, run]));
+  const answered = new Map(
+    rows(view, "cards", { task_id: id })
+      .filter((card) => card.kind === "ask" && card.answer_event && card.run_id)
+      .map((card) => [card.answer_event, card.run_id]),
+  );
+  // 人工回复继续同一规则时，继承提问轮次的业务来源，交接链不因问题卡片断开。
+  const businessParents = (run: Row) => {
+    const result = new Set<number>(),
+      visited = new Set<number>();
+    const pending = [run];
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (visited.has(current.id)) continue;
+      visited.add(current.id);
+      for (const event of eventsOf(view, current.id)) {
+        const parent = parents.get(event.id);
+        if (parent !== undefined) result.add(parent);
+        const continuation = byRun.get(answered.get(event.id));
+        if (continuation && continuation.rule === run.rule && continuation.task_attempt === run.task_attempt)
+          pending.push(continuation);
+      }
+    }
+    return [...result];
+  };
   const eventView = (event: Row) => ({
     id: event.id,
     key: event.key,
@@ -296,7 +321,7 @@ export function taskDetails(view: View, id: string, env: Environment) {
         error: run.error,
         inputs,
         events: emitted,
-        parents: [...new Set(inputs.flatMap((event) => (parents.has(event.id) ? [parents.get(event.id)!] : [])))],
+        parents: businessParents(run),
         rejected: JSON.parse(run.last_answer ?? "[]") as Array<{ what?: string; card?: number; reason: string }>,
       };
     }),

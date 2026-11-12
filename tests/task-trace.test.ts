@@ -111,6 +111,40 @@ test("人工明确续接后沿原任务与会话获得新预算，普通回答�
   }
 });
 
+test("审核多次提问后保留原开发交接，重建不丢失业务来源", () => {
+  const h = fixture();
+  try {
+    h.create("question");
+    const development = h.act("claimNext", "development", "dev");
+    h.act("finish", development.run, development.token, {
+      outcome: "done",
+      events: [{ id: "ready", type: "development.ready" }],
+    });
+    let review = h.act("claimNext", "review", "review");
+    for (let index = 0; index < 2; index++) {
+      h.act("finish", review.run, review.token, {
+        outcome: "done",
+        session: "review-session",
+        ask: [{ title: "请明确", text: "验收范围", options: ["继续", "补充说明"], key: `q-${index}` }],
+      });
+      const card = h.details("question").cards.find((value: any) => value.state === "open");
+      h.act("answer", card.id, { text: "沿当前需求继续", by: "同事" });
+      review = h.act("claimNext", "review", `resume-${index}`);
+      assert.equal(review.session, "review-session");
+      assert.deepEqual(h.details("question").executions.at(-1).parents, [development.run]);
+    }
+    h.act("finish", review.run, review.token, { outcome: "done", events: [{ id: "passed", type: "review.passed" }] });
+    const check = h.act("claimNext", "test", "test");
+    assert.deepEqual(h.details("question").executions.at(-1).parents, [review.run]);
+    assert.equal(check.task.id, "question");
+    const before = h.details("question");
+    h.rebuild();
+    assert.deepEqual(h.details("question"), before);
+  } finally {
+    h.close();
+  }
+});
+
 test("开发、独立审核、测试退回和续接沿真实事件关联，其他任务不会抢走会话", () => {
   const h = fixture();
   try {
