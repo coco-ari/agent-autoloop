@@ -1,7 +1,8 @@
 import type { Rule } from "../kernel/rules.ts";
+import type { TaskWorkspaceBinding } from "./task-client-types.ts";
 export type Job = {
   run: number;
-  task?: { id: string; attempt: number };
+  task?: { id: string; attempt: number; workspace?: TaskWorkspaceBinding };
   token: string;
   attempt: number;
   rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "emits" | "expected" | "workspace">;

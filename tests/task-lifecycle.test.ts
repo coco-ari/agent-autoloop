@@ -6,8 +6,9 @@ import { decide } from "../kernel/decide.ts";
 import { empty, rows, snapshot } from "../kernel/evolve.ts";
 import { commit, rebuild, iterateLog } from "../kernel/store.ts";
 import { parseRules } from "../protocol/rules.ts";
-import { taskView } from "../kernel/query.ts";
+import { taskView, taskDetails } from "../kernel/query.ts";
 import { replay } from "../sim/invariants.ts";
+import { handoff } from "../worker/handoff.ts";
 
 function fixture() {
   let view = empty();
@@ -65,6 +66,113 @@ test("重新执行必须先停止，重复请求不增加尝试，旧请求不�
     assert.equal(job.context.events.length, 1);
     h.rebuild();
     assert.equal(taskView(h.get(), "one")?.attempt, 2);
+  } finally {
+    h.get().close();
+  }
+});
+
+test("任务仓库与目标在规则更新、事实重建及重新执行后保持绑定，重复创建不能改绑", () => {
+  const h = fixture();
+  const workspace = {
+    worker: "w1",
+    repository: "/approved/repo",
+    root: "/approved/tasks",
+    ref: "main",
+    target: { remote: "git@example.invalid:fixture/repo.git", branch: "main" },
+  };
+  const input = {
+    id: "bound",
+    project: "test",
+    source: "app",
+    workspace,
+    event: { id: "bound:start", type: "feedback.new" },
+  };
+  try {
+    h.act("createTask", input);
+    assert.throws(() => h.act("createTask", { ...input, workspace: { ...workspace, ref: "other" } }), /冲突/);
+    h.rules.rules[0].cwd = "/another/repo";
+    h.rules.agents[h.rules.rules[0].to].worker = "w2";
+    h.act("rules", h.rules);
+    h.rebuild();
+    assert.equal(h.act("claimNext", "w2", "wrong-worker"), null);
+    const job = h.act("claimNext", "w1", "first");
+    assert.deepEqual(job.task.workspace, workspace);
+    const details = taskDetails(h.get(), "bound", { secret: "fictional", publicUrl: "" });
+    assert.ok(details && "executions" in details);
+    assert.equal(details.executions[0].worker, "w1");
+    assert.equal(h.get().get("runs", job.run)?.worker, "w1");
+    h.act("stopTask", "bound", 1);
+    h.act("finish", job.run, job.token, { outcome: "cancelled" });
+    h.act("restartTask", "bound", {
+      request: "again",
+      attempt: 1,
+      event: { id: "bound:restart", type: "feedback.new" },
+    });
+    assert.deepEqual(h.act("claimNext", "w1", "second").task.workspace, workspace);
+  } finally {
+    h.get().close();
+  }
+});
+
+test("开发审核测试交付中的主线推进返工，可在原生八层预算内重新检查并完成", () => {
+  const h = fixture();
+  try {
+    const original = h.rules.rules[0];
+    h.rules.rules = [
+      {
+        ...original,
+        name: "develop",
+        when: { source: "app", types: ["feedback.new", "merge.changed"] },
+        expected: ["dev.ready"],
+        emits: { source: "app", types: ["dev.ready"] },
+      },
+      {
+        ...original,
+        name: "review",
+        when: { source: "app", types: ["dev.ready"] },
+        expected: ["review.passed"],
+        emits: { source: "app", types: ["review.passed"] },
+      },
+      {
+        ...original,
+        name: "test",
+        when: { source: "app", types: ["review.passed"] },
+        expected: ["test.passed"],
+        emits: { source: "app", types: ["test.passed"] },
+      },
+      {
+        ...original,
+        name: "deliver",
+        when: { source: "app", types: ["test.passed"] },
+        expected: ["merge.changed", "merge.done"],
+        emits: { source: "app", types: ["merge.changed", "merge.done"] },
+      },
+    ];
+    h.act("rules", h.rules);
+    h.create("race");
+    const path = [
+      "dev.ready",
+      "review.passed",
+      "test.passed",
+      "merge.changed",
+      "dev.ready",
+      "review.passed",
+      "test.passed",
+      "merge.done",
+    ];
+    for (const [index, type] of path.entries()) {
+      const job = h.act("claimNext", "w1", `claim-${index}`);
+      assert.ok(job, `第 ${index + 1} 步必须可领取`);
+      const result = handoff(job, {
+        outcome: "done",
+        events: [{ id: `event-${index}`, type, subject: "race", summary: "", detail: "", link: "", hops: 0 }],
+      });
+      assert.equal(result.ask, undefined);
+      const answer = h.act("finish", job.run, job.token, result);
+      assert.deepEqual(answer.rejected, []);
+    }
+    assert.equal(h.act("claimNext", "w1", "finished"), null);
+    assert.equal(rows(h.get(), "runs", { task_id: "race", state: "done" }).length, 8);
   } finally {
     h.get().close();
   }

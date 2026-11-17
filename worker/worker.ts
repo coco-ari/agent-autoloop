@@ -230,7 +230,7 @@ export function createWorker({
     });
 
   /** Starts a turn of the agent: a process that outlives this one, leaving its output and exit code in files. */
-  function launch(entry: Entry, adapter: Adapter, prompt: string) {
+  async function launch(entry: Entry, adapter: Adapter, prompt: string) {
     if (entry.job.task)
       writeFileSync(
         path.join(entry.dir, "owner.json"),
@@ -250,6 +250,12 @@ export function createWorker({
       entry.workspace = prepareWorkspace(entry.job, roots);
       save(entry);
     }
+    if (entry.job.task?.workspace?.target) {
+      // 同步远端有明确超时；完成后重新核对停止，不能让期间收到的停止请求漏过启动边界。
+      const answer = await hub.work({ claim, wait: 0, running: entries().map((item) => item.run), capacity: false });
+      if (answer?.cancel?.includes(entry.run))
+        return endWith(entry, { outcome: "cancelled", summary: "源码准备后、执行前已停止" });
+    }
     if (entry.workspace?.requiresApproval)
       return endWith(entry, {
         outcome: "done",
@@ -266,7 +272,9 @@ export function createWorker({
       });
     const cwd = entry.workspace?.directory ?? rule.cwd.replace(/^~(?=[/\\])/, homedir());
     const turn: Turn = {
-      prompt,
+      prompt: entry.workspace?.integration
+        ? `${prompt}\n\nWorker 代码准备结果：${entry.workspace.integration}`
+        : prompt,
       session: entry.session,
       resume: entry.resume,
       cwd,
@@ -380,7 +388,7 @@ export function createWorker({
       const adapter = await adapterFor(job.agent.use);
       entry.prompt = promptFor(job, path.join(dir, "context.json"));
       save(entry);
-      launch(entry, adapter, entry.prompt);
+      await launch(entry, adapter, entry.prompt);
     } catch (error) {
       endWith(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
     }
@@ -415,7 +423,7 @@ export function createWorker({
   }
 
   /** A turn has ended. What it said is a result, or a reason to ask it again without redoing anything. */
-  function conclude(entry: Entry, adapter: Adapter, code: number | null) {
+  async function conclude(entry: Entry, adapter: Adapter, code: number | null) {
     // One ended because its turn was over but it wouldn't exit said what it had to say first.
     const seen = read(entry, adapter, entry.finishedAt ? 0 : code);
     entry.usage = addUsage(addUsage(entry.usage, seen.usage), sessionRise(entry, seen));
@@ -472,7 +480,7 @@ export function createWorker({
         entry.resume = null;
         entry.session = randomUUID();
         try {
-          launch(entry, adapter, entry.prompt);
+          await launch(entry, adapter, entry.prompt);
           return;
         } catch (failure) {
           return endWith(entry, { outcome: "failed", error: String(failure).slice(0, 500) });
@@ -500,7 +508,7 @@ export function createWorker({
       entry.repairs += 1;
       entry.resume = seen.session;
       try {
-        launch(entry, adapter, repairPrompt(problem));
+        await launch(entry, adapter, repairPrompt(problem));
         return;
       } catch (error) {
         return discardReceipt(entry, adapter, String(error));
@@ -547,7 +555,7 @@ export function createWorker({
         writeFileSync(path.join(entry.dir, "context.json"), JSON.stringify(entry.job.context, null, 2), {
           mode: 0o600,
         });
-        return launch(entry, adapter, entry.prompt);
+        return await launch(entry, adapter, entry.prompt);
       } catch (error) {
         return endWith(entry, { outcome: "failed", error: String((error as Error).message ?? error).slice(0, 500) });
       }

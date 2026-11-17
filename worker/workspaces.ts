@@ -7,6 +7,8 @@ import { HOME } from "../host/home.ts";
 import { git } from "../host/git.ts";
 import type { Job } from "../protocol/job.ts";
 import type { WorkspaceEvidence } from "../protocol/workspace.ts";
+import type { TaskWorkspaceBinding } from "../protocol/task-client-types.ts";
+import { fetchTarget, ancestor, checkpoint, commitOptions } from "./branch.ts";
 
 const records = path.join(HOME, "worker", "workspaces");
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -19,12 +21,14 @@ type Owned = {
   base: string;
   candidate?: string;
   developments?: number[];
+  binding?: TaskWorkspaceBinding;
 };
 export type PreparedWorkspace = Owned & {
   mode: "develop" | "review" | "test";
   worktree: string;
   run: number;
   requiresApproval: boolean;
+  integration?: string;
 };
 const fileOf = (task: string) => path.join(records, hash(task) + ".json");
 const read = (task: string): Owned[] =>
@@ -76,9 +80,10 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
   const config = job.rule.workspace;
   if (!config) return;
   if (!job.task) throw new Error("独占目录只用于有身份的任务");
-  const repository = approved(job.rule.cwd, roots);
+  const binding = job.task.workspace;
+  const repository = approved(binding?.repository ?? job.rule.cwd, roots);
   if (actual(git(repository, "rev-parse", "--show-toplevel")) !== repository) throw new Error("请选择 Git 仓库根目录");
-  const root = approved(config.root, roots);
+  const root = approved(binding?.root ?? config.root, roots);
   if (inside(repository, root)) throw new Error("任务目录不能放在源码仓库内");
   const parent = path.join(root, hash(job.task.id), String(job.task.attempt));
   const directory = path.join(parent, "tree");
@@ -92,7 +97,12 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
       repository,
       parent,
       directory,
-      base: git(repository, "rev-parse", "--verify", `${config.ref}^{commit}`),
+      base: binding?.target
+        ? fetchTarget(repository, binding.target, `refs/task-targets/${hash(job.task.id)}/${job.task.attempt}`, (dir) =>
+            approved(dir, roots),
+          )
+        : git(repository, "rev-parse", "--verify", `${binding?.ref ?? config.ref}^{commit}`),
+      ...(binding ? { binding } : {}),
     };
     // 审核或检查也可直接成为入口，首轮以固定基准作为候选，不依赖虚构的开发步骤。
     if (config.mode !== "develop") value.candidate = value.base;
@@ -100,6 +110,8 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
     save(job.task.id, values);
   }
   verifyOwned(value, job.task.id, roots);
+  if (JSON.stringify(value.binding) !== JSON.stringify(binding))
+    throw new Error("同一任务的仓库和目标分支绑定不能改变");
   if (value.repository !== repository || value.parent !== parent) throw new Error("同一任务的执行环境不能改变");
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   if (!existsSync(directory)) git(repository, "worktree", "add", "--detach", directory, value.base);
@@ -107,6 +119,42 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
   if (actual(git(directory, "rev-parse", "--show-toplevel")) !== directory || common(directory) !== common(repository))
     throw new Error("任务目录不属于原仓库");
   let cwd = directory;
+  let integration: string | undefined;
+  if (config.mode === "develop" && binding?.target && value.candidate) {
+    const head = fetchTarget(
+      repository,
+      binding.target,
+      `refs/task-targets/${hash(job.task.id)}/${job.task.attempt}`,
+      (dir) => approved(dir, roots),
+    );
+    if (!ancestor(repository, value.base, head)) throw new Error("目标分支历史已重写，停止自动整合，请核实目标历史");
+    const conflicts = git(directory, "ls-files", "--unmerged");
+    if (conflicts)
+      integration = `目标分支整合存在冲突。保留双方有效改动，解决并 git add 冲突文件；由 Worker 固定合并候选，再重新审核和测试。当前基准 ${value.base}。`;
+    else if (!ancestor(repository, head, git(directory, "rev-parse", "HEAD"))) {
+      // 先保全上一轮提问前的修改，禁止用 reset 或清空目录来同步主线。
+      checkpoint(directory);
+      value.base = head;
+      save(job.task.id, values);
+      try {
+        git(
+          directory,
+          ...commitOptions,
+          "-c",
+          "merge.autoStash=false",
+          "merge",
+          "--ff",
+          "--no-edit",
+          "--no-verify",
+          head,
+        );
+        integration = `已整合目标分支的新提交 ${head}。核对组合后的功能，再交独立审核与测试；旧通过记录不能代替本次检查。`;
+      } catch (error) {
+        if (!git(directory, "ls-files", "--unmerged")) throw error;
+        integration = `已开始整合目标分支 ${head}，存在冲突。解决并 git add 冲突文件，保留双方有效修改；Worker 将固定候选并重新审核测试。`;
+      }
+    }
+  }
   if (config.mode !== "develop") {
     if (
       !value.candidate ||
@@ -140,27 +188,23 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
     !value.developments?.includes(job.run) &&
     !job.context.answers.length &&
     !job.context.taskRequest?.explicit;
-  return { ...value, mode: config.mode, directory: cwd, worktree: directory, run: job.run, requiresApproval };
+  return {
+    ...value,
+    mode: config.mode,
+    directory: cwd,
+    worktree: directory,
+    run: job.run,
+    requiresApproval,
+    ...(integration ? { integration } : {}),
+  };
 }
 
 export function captureWorkspace(prepared: PreparedWorkspace): WorkspaceEvidence {
   let candidate = prepared.candidate;
   if (prepared.mode === "develop") {
-    git(prepared.worktree, "add", "--all");
-    if (git(prepared.worktree, "diff", "--cached", "--name-only"))
-      git(
-        prepared.worktree,
-        "-c",
-        "user.name=Task Worker",
-        "-c",
-        "user.email=worker@example.invalid",
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "-m",
-        "固定任务候选代码",
-      );
-    candidate = git(prepared.worktree, "rev-parse", "HEAD");
+    candidate = checkpoint(prepared.worktree);
+    if (!ancestor(prepared.repository, prepared.base, candidate))
+      throw new Error("候选尚未包含目标基准，不能交给审核和测试");
     const values = read(prepared.task);
     const value = values.find((entry) => entry.attempt === prepared.attempt);
     if (!value) throw new Error("任务目录归属记录丢失");
@@ -185,6 +229,8 @@ export function cleanupWorkspaces(task: string, roots: readonly string[]) {
       git(value.repository, "worktree", "remove", "--force", value.directory);
     }
     if (existsSync(value.parent)) rmSync(value.parent, { recursive: true, force: true });
+    if (value.binding?.target)
+      git(value.repository, "update-ref", "-d", `refs/task-targets/${hash(task)}/${value.attempt}`);
   }
   rmSync(fileOf(task), { force: true });
 }

@@ -15,7 +15,10 @@ export function pauseOf(view: View, rule: Rule, now: number): Row | null {
   return row && (row.until === null || Date.parse(row.until) > now) ? row : null;
 }
 
-export const workerOf = (view: View, run: Row) => configuration(view, run.rules_version).agents[run.agent]?.worker;
+export const boundWorker = (view: View, run: Row): string | undefined =>
+  run.task_id ? view.get("tasks", run.task_id)?.workspace?.worker : undefined;
+export const workerOf = (view: View, run: Row) =>
+  boundWorker(view, run) ?? configuration(view, run.rules_version).agents[run.agent]?.worker;
 export function agentsOf(view: View, worker: string) {
   const agents = Object.entries(configuration(view).agents);
   return agents.filter(([, agent]) => agent.worker === worker).map(([id]) => id);
@@ -23,7 +26,7 @@ export function agentsOf(view: View, worker: string) {
 export const workers = (view: View) =>
   new Set([
     ...Object.values(configuration(view)?.agents ?? {}).map((agent) => agent.worker),
-    ...rows(view, "runs", { state: "claimed" }).map((run) => workerOf(view, run)!),
+    ...rows(view, "runs", { state: ["queued", "claimed", "unknown"] }).map((run) => workerOf(view, run)!),
   ]);
 
 /** What a worker's agents have on: runs in hand and runs ready to be claimed. */
@@ -154,11 +157,17 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
   const requestView = (event: Row) => ({ summary: event.summary, detail: event.detail });
   return {
     run: run.id,
-    ...(run.task_id && { task: { id: run.task_id, attempt: run.task_attempt } }),
+    ...(run.task_id && {
+      task: {
+        id: run.task_id,
+        attempt: run.task_attempt,
+        ...(view.get("tasks", run.task_id)?.workspace ? { workspace: view.get("tasks", run.task_id)!.workspace } : {}),
+      },
+    }),
     token: credential(env, "run", run.id, run.issued),
     attempt: run.attempts + 1,
     rule: { name, cwd, skill, prompt, emits, ...(expected && { expected }), ...(workspace && { workspace }) },
-    agent: { ...rules.agents[run.agent], id: run.agent },
+    agent: { ...rules.agents[run.agent], worker: workerOf(view, run), id: run.agent },
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
     context: {
@@ -307,7 +316,7 @@ export function taskDetails(view: View, id: string, env: Environment) {
         rule: run.rule,
         agent: run.agent,
         agentName: agent?.name ?? run.agent,
-        worker: agent?.worker ?? null,
+        worker: run.worker ?? workerOf(view, run) ?? null,
         runtime: agent?.use ?? null,
         model: agent?.model ?? null,
         effort: agent?.effort ?? null,

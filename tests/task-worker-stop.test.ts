@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
+import { execFileSync } from "node:child_process";
 import { setup } from "./helpers.ts";
 import type { Job } from "../protocol/job.ts";
 const home = setup("task-worker-stop");
@@ -95,4 +96,54 @@ test("启动前重启必须先核对 Hub，断联不启动，恢复后沿原记�
   assert.equal(results[0]?.outcome, "cancelled");
   assert.equal(worker.entries().length, 0);
   assert.equal(existsSync(join(home, "launched-2")), false);
+});
+
+test("目标分支准备期间收到停止，核对 Hub 后不启动 Agent", async () => {
+  const repository = join(home, "repo"),
+    remote = join(home, "remote.git"),
+    root = join(home, "tasks");
+  mkdirSync(repository);
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-C", repository, ...args], { stdio: "pipe", windowsHide: true });
+  git("init", "-b", "main");
+  writeFileSync(join(repository, "fixture.txt"), "隔离代码");
+  git("add", ".");
+  git("-c", "user.name=隔离验收", "-c", "user.email=fixture@example.invalid", "commit", "-m", "建立基准");
+  git("clone", "--bare", repository, remote);
+  const given = job(3);
+  given.task = {
+    id: "prepare-stop",
+    attempt: 1,
+    workspace: { repository, root, ref: "main", target: { remote, branch: "main" } },
+  };
+  given.rule.workspace = { root, ref: "HEAD", mode: "develop" };
+  const results: any[] = [];
+  let offered = false,
+    checked = false;
+  const worker = createWorker({
+    name: "w",
+    wait: 0,
+    roots: [home],
+    hub: {
+      work: async (input) => {
+        if (offered && input?.capacity === false) checked = true;
+        const answer = { job: offered ? null : given, cancel: offered ? [3] : [] };
+        offered = true;
+        return answer;
+      },
+      started: async () => {
+        throw new Error("停止后不应启动");
+      },
+      result: async (_id, _token, value) => {
+        results.push(value);
+        return {};
+      },
+    },
+  });
+  await worker.tick();
+  await worker.tick();
+  assert.equal(checked, true);
+  assert.equal(results[0]?.outcome, "cancelled");
+  assert.equal(existsSync(join(home, "launched-3")), false);
+  assert.equal(worker.entries().length, 0);
 });

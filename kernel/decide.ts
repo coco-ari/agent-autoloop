@@ -7,6 +7,7 @@ import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import { TABLES, keyOf, iso, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
 import {
   agentsOf,
+  boundWorker,
   cardView,
   configuration,
   eventsOf,
@@ -373,7 +374,9 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const claimable = (run: Row) =>
     run.state === "queued" &&
     !stoppedTask(draft, run) &&
-    agents.includes(ruleNamed(draft, run.rule)?.to ?? "") &&
+    (boundWorker(draft.view, run)
+      ? boundWorker(draft.view, run) === worker
+      : agents.includes(ruleNamed(draft, run.rule)?.to ?? "")) &&
     Date.parse(run.not_before) <= draft.now &&
     unpaused(run.rule) &&
     !claimed.some((other) => other.grp === run.grp && other.lane === run.lane) &&
@@ -388,7 +391,7 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   }
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
   const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
-  const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
+  const claiming = { state: "claimed", worker, claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
   put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
   if (run.task_id) {
     const id = [run.task_id, worker, run.id, run.attempts + 1].join(":");
@@ -817,6 +820,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       project: input.project,
       source: input.source,
       input_hash: hash,
+      ...(input.workspace ? { workspace: input.workspace } : {}),
       created_at: draft.at,
       stop_requested_at: null,
       attempt: 1,
