@@ -61,7 +61,7 @@ export function promptFor(job: Job, contextFile: string) {
     "怎么结束这一轮：",
     ...(rule.expected
       ? [
-          `- 本阶段必须发出且只发出一个结果事件：${rule.expected.join("、")}；需要人工处理时返回 ask，不同时发出结果事件。`,
+          `- 本阶段须交回满足实际条件的结果事件，可一次返回多个：${rule.expected.join("、")}。每件独立结果使用不同的稳定 id；需要人工处理时返回 ask，先回答再交接，不同时发出结果事件。`,
         ]
       : []),
     `- 这些事要先征求决定：${askFirst.join("、")}。其余能自己处理的直接做完。定过的事不要再问。`,

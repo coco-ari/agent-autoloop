@@ -6,6 +6,8 @@ import { empty } from "../kernel/evolve.ts";
 import { taskDetails } from "../kernel/query.ts";
 import { commit, rebuild } from "../kernel/store.ts";
 import { parseRules } from "../protocol/rules.ts";
+import { handoff } from "../worker/handoff.ts";
+import { parseResult } from "../protocol/validate.ts";
 
 const environment = { secret: "fictional-trace-secret", publicUrl: "" };
 function fixture() {
@@ -76,6 +78,73 @@ function fixture() {
     close: () => view.close(),
   };
 }
+
+test("多事件和多接收方沿同一任务串行，返工与重放不丢交接", () => {
+  const h = fixture();
+  try {
+    const rules = structuredClone(h.rules);
+    for (const rule of rules.rules) {
+      rule.group = "shared";
+      rule.parallel = 2;
+    }
+    rules.rules[0]!.expected = ["development.ready"];
+    rules.rules[1]!.expected = ["review.passed", "review.changes"];
+    rules.rules[2]!.when = { source: "project", types: ["development.ready", "review.passed"] };
+    h.act("rules", rules);
+    h.create("branching");
+    const development = h.act("claimNext", "development", "start");
+    const receipt = handoff(
+      development,
+      parseResult({
+        outcome: "done",
+        session: "development-session",
+        events: [
+          { id: "code", type: "development.ready", summary: "实现完成" },
+          { id: "docs", type: "development.ready", summary: "文档完成" },
+        ],
+      }),
+    );
+    h.act("finish", development.run, development.token, receipt);
+    const first = h.details("branching");
+    assert.equal(first.executions[0].events.length, 2);
+    assert.deepEqual(first.executions[0].events[0].routed, ["审核", "测试"]);
+    assert.equal(first.executions.length, 3);
+    h.act("finish", development.run, development.token, receipt);
+    assert.deepEqual(h.details("branching"), first);
+    const review = h.act("claimNext", "review", "review");
+    assert.equal(review.context.events.length, 2);
+    assert.equal(h.act("claimNext", "test", "blocked-by-review"), null);
+    h.act(
+      "finish",
+      review.run,
+      review.token,
+      handoff(
+        review,
+        parseResult({
+          outcome: "done",
+          events: [
+            { id: "frontend", type: "review.passed", summary: "前端通过" },
+            { id: "backend", type: "review.changes", summary: "后端需要修改" },
+          ],
+        }),
+      ),
+    );
+    const check = h.act("claimNext", "test", "test");
+    assert.equal(check.task.id, "branching");
+    assert.equal(check.context.events.length, 3);
+    assert.equal(h.act("claimNext", "development", "blocked-by-test"), null);
+    h.act("finish", check.run, check.token, { outcome: "done", summary: "检查结束" });
+    const rework = h.act("claimNext", "development", "rework");
+    assert.equal(rework.task.id, "branching");
+    assert.equal(rework.session, "development-session");
+    assert.equal(rework.context.events[0].type, "review.changes");
+    const before = h.details("branching");
+    h.rebuild();
+    assert.deepEqual(h.details("branching"), before);
+  } finally {
+    h.close();
+  }
+});
 
 test("人工明确续接后沿原任务与会话获得新预算，普通回答不能自动清零", () => {
   const h = fixture();

@@ -411,7 +411,7 @@ export function createWorker({
       title: `「${entry.job.rule.name}」的回执读不懂`,
       text: `这一轮按第一行算结束了，但它要中台做的事没有生效（${problem}）。原文在 ${files(original).out}，留 ${KEEP_DAYS} 天。`,
     };
-    endWith(entry, { ...result, notice: [...(result.notice ?? []), notice] });
+    endWith(entry, { ...handoff(entry.job, result), notice: [...(result.notice ?? []), notice] });
   }
 
   /** A turn has ended. What it said is a result, or a reason to ask it again without redoing anything. */

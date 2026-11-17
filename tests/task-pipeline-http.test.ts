@@ -28,7 +28,8 @@ const context=JSON.parse(readFileSync(process.env.AGENT_AUTOLOOP_CONTEXT,'utf8')
 const review=process.argv[2]==='review';
 if(!review)writeFileSync('value.txt',context.events.some(e=>e.type==='test.failed')?'fixed':'broken');
 if(review&&!readFileSync('changes.txt','utf8').includes('value.txt'))throw Error('缺少审核快照');
-console.log('本阶段已完成\\n'+'\x60\x60\x60agent-autoloop\\n'+JSON.stringify({events:[{id:'result-'+process.env.AGENT_AUTOLOOP_RUN,type:review?'review.passed':'development.ready',summary:review?'审核通过':'开发完成'}]})+'\\n\x60\x60\x60');`,
+const events=review?[{id:'review',type:'review.passed',summary:'审核通过'}]:[{id:'code',type:'development.ready',summary:'代码完成'},{id:'checks',type:'development.ready',summary:'检查资料完成'}];
+console.log('本阶段已完成\\n'+'\x60\x60\x60agent-autoloop\\n'+JSON.stringify({events})+'\\n\x60\x60\x60');`,
 );
 const source = "project";
 const agents = {
@@ -137,6 +138,14 @@ test("真实命令形成开发、审查、测试打回、返工再审再测的�
       ["develop", "review", "test", "develop", "review", "test"],
     );
     const evidence = details.executions.map((run: any) => run.evidence);
+    assert.equal(details.executions[0].events.length, 2);
+    assert.equal(details.executions[3].events.length, 2);
+    assert.equal(details.executions[1].inputs.length, 2);
+    assert.equal(details.executions[4].inputs.length, 2);
+    assert.equal(
+      new Set([...details.executions[0].events, ...details.executions[3].events].map((event: any) => event.id)).size,
+      4,
+    );
     assert.equal(evidence[0].candidate, evidence[1].candidate);
     assert.equal(evidence[1].candidate, evidence[2].candidate);
     assert.equal(evidence[2].exitCode, 1);
