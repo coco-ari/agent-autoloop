@@ -90,7 +90,7 @@ export const commitOptions = [
   "-c",
   "commit.gpgsign=false",
 ];
-export function checkpoint(directory: string) {
+export function checkpoint(directory: string, message: string) {
   if (git(directory, "ls-files", "--unmerged")) throw new Error("仍有未解决的合并冲突，请处理并暂存冲突文件后再交接");
   git(directory, "add", "--all");
   let merging = false;
@@ -101,6 +101,6 @@ export function checkpoint(directory: string) {
     /* 没有待提交的合并。 */
   }
   if (merging || git(directory, "diff", "--cached", "--name-only"))
-    git(directory, ...commitOptions, "commit", "-m", "固定任务候选代码");
+    git(directory, ...commitOptions, "commit", "-m", message);
   return git(directory, "rev-parse", "HEAD");
 }

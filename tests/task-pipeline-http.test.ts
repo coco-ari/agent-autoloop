@@ -26,10 +26,11 @@ writeFileSync(
   `import{readFileSync,writeFileSync}from'node:fs';
 const context=JSON.parse(readFileSync(process.env.AGENT_AUTOLOOP_CONTEXT,'utf8'));
 const review=process.argv[2]==='review';
+const rework=context.events.some(e=>e.type==='test.failed');
 if(!review)writeFileSync('value.txt',context.events.some(e=>e.type==='test.failed')?'fixed':'broken');
 if(review&&!readFileSync('changes.txt','utf8').includes('value.txt'))throw Error('缺少审核快照');
 const events=review?[{id:'review',type:'review.passed',summary:'审核通过'}]:[{id:'code',type:'development.ready',summary:'代码完成'},{id:'checks',type:'development.ready',summary:'检查资料完成'}];
-console.log('本阶段已完成\\n'+'\x60\x60\x60agent-autoloop\\n'+JSON.stringify({events})+'\\n\x60\x60\x60');`,
+console.log((review?'审核通过':rework?'修复测试发现的取值错误':'实现取值功能')+'\\n'+'\x60\x60\x60agent-autoloop\\n'+JSON.stringify({events})+'\\n\x60\x60\x60');`,
 );
 const source = "project";
 const agents = {
@@ -123,12 +124,29 @@ test("真实命令形成开发、审查、测试打回、返工再审再测的�
     });
     const owner = hubClient(message.url, message.keys.owner),
       client = hubClient(message.url, message.keys.worker);
-    const worker = createWorker({ name: "worker", hub: client, roots: [root], wait: 0 });
+    let dropped = false;
+    const connection = {
+      ...client,
+      result: async (...args: Parameters<typeof client.result>) => {
+        const response = await client.result(...args);
+        if (!dropped) {
+          dropped = true;
+          throw new Error("隔离模拟：Hub 已接收结果，但响应丢失");
+        }
+        return response;
+      },
+    };
+    let worker = createWorker({ name: "worker", hub: connection, roots: [root], wait: 0 });
+    let restarted = false;
     await owner.createTask({ id: "pipeline", project: "test", source, event: { id: "start", type: "task.created" } });
     let details: any;
     const deadline = Date.now() + 45000;
     while (Date.now() < deadline) {
       await worker.tick();
+      if (dropped && !restarted) {
+        worker = createWorker({ name: "worker", hub: connection, roots: [root], wait: 0 });
+        restarted = true;
+      }
       details = await owner.taskDetails("pipeline");
       if (details.executions.some((run: any) => run.events.some((event: any) => event.type === "test.passed"))) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -138,6 +156,8 @@ test("真实命令形成开发、审查、测试打回、返工再审再测的�
       ["develop", "review", "test", "develop", "review", "test"],
     );
     const evidence = details.executions.map((run: any) => run.evidence);
+    assert.equal(git("show", "-s", "--format=%s", evidence[0].candidate), "实现取值功能");
+    assert.equal(git("show", "-s", "--format=%s", evidence[3].candidate), "修复测试发现的取值错误");
     assert.equal(details.executions[0].events.length, 2);
     assert.equal(details.executions[3].events.length, 2);
     assert.equal(details.executions[1].inputs.length, 2);
@@ -153,6 +173,8 @@ test("真实命令形成开发、审查、测试打回、返工再审再测的�
     assert.equal(evidence[4].candidate, evidence[5].candidate);
     assert.notEqual(evidence[0].candidate, evidence[5].candidate);
     assert.equal(evidence[5].exitCode, 0);
+    assert.equal(restarted, true);
+    assert.equal(git("rev-list", "--count", `${evidence[0].base}..${evidence[5].candidate}`), "2");
     assert.deepEqual(details.executions[3].parents, [details.executions[2].id]);
     assert.ok((await owner.runOutput(details.executions[2].id)).items.length);
     await owner.deleteTask("pipeline");

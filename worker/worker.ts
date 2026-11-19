@@ -495,7 +495,7 @@ export function createWorker({
     if (!problem) {
       if (entry.workspace && !result.ask?.length && ["done", "nothing"].includes(result.outcome)) {
         try {
-          entry.evidence = captureWorkspace(entry.workspace);
+          entry.evidence = captureWorkspace(entry.workspace, result.summary);
         } catch (error) {
           return endWith(entry, { outcome: "failed", error: String(error).slice(0, 500), ...known, ...usage });
         }

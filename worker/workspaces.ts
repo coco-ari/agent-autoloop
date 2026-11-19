@@ -9,6 +9,7 @@ import type { Job } from "../protocol/job.ts";
 import type { WorkspaceEvidence } from "../protocol/workspace.ts";
 import type { TaskWorkspaceBinding } from "../protocol/task-client-types.ts";
 import { fetchTarget, ancestor, checkpoint, commitOptions } from "./branch.ts";
+import { commitMessage, taskCommitMessage } from "./commit-message.ts";
 
 const records = path.join(HOME, "worker", "workspaces");
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -29,6 +30,7 @@ export type PreparedWorkspace = Owned & {
   run: number;
   requiresApproval: boolean;
   integration?: string;
+  title?: string;
 };
 const fileOf = (task: string) => path.join(records, hash(task) + ".json");
 const read = (task: string): Owned[] =>
@@ -133,7 +135,8 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
       integration = `目标分支整合存在冲突。保留双方有效改动，解决并 git add 冲突文件；由 Worker 固定合并候选，再重新审核和测试。当前基准 ${value.base}。`;
     else if (!ancestor(repository, head, git(directory, "rev-parse", "HEAD"))) {
       // 先保全上一轮提问前的修改，禁止用 reset 或清空目录来同步主线。
-      checkpoint(directory);
+      const identity = { task: job.task.id, attempt: job.task.attempt, run: job.run };
+      checkpoint(directory, commitMessage("保存任务改动以同步目标分支", identity));
       value.base = head;
       save(job.task.id, values);
       try {
@@ -146,6 +149,8 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
           "--ff",
           "--no-edit",
           "--no-verify",
+          "-m",
+          commitMessage("合入目标分支更新", identity),
           head,
         );
         integration = `已整合目标分支的新提交 ${head}。核对组合后的功能，再交独立审核与测试；旧通过记录不能代替本次检查。`;
@@ -194,15 +199,16 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
     directory: cwd,
     worktree: directory,
     run: job.run,
+    title: job.context.taskRequest?.original.summary,
     requiresApproval,
     ...(integration ? { integration } : {}),
   };
 }
 
-export function captureWorkspace(prepared: PreparedWorkspace): WorkspaceEvidence {
+export function captureWorkspace(prepared: PreparedWorkspace, summary?: string): WorkspaceEvidence {
   let candidate = prepared.candidate;
   if (prepared.mode === "develop") {
-    candidate = checkpoint(prepared.worktree);
+    candidate = checkpoint(prepared.worktree, taskCommitMessage(prepared, summary));
     if (!ancestor(prepared.repository, prepared.base, candidate))
       throw new Error("候选尚未包含目标基准，不能交给审核和测试");
     const values = read(prepared.task);

@@ -47,6 +47,7 @@ test("两个任务共用旧基准，第二个整合新主线后产生新的待�
   const a = captureWorkspace(first);
   writeFileSync(join(second.worktree, "second.txt"), "second task\n");
   const b = captureWorkspace(second);
+  writeFileSync(join(second.worktree, "pending.txt"), "提问前尚未固定的改动\n");
   git(repository, "push", remote, `${a.candidate}:refs/heads/main`);
   const next = job("second", 2);
   next.rule.cwd = join(home, "wrong-repository");
@@ -55,6 +56,12 @@ test("两个任务共用旧基准，第二个整合新主线后产生新的待�
   assert.equal(integrated.base, a.candidate);
   assert.equal(readFileSync(join(integrated.worktree, "first.txt"), "utf8"), "first task\n");
   assert.equal(readFileSync(join(integrated.worktree, "second.txt"), "utf8"), "second task\n");
+  assert.equal(git(integrated.worktree, "show", "-s", "--format=%s", "HEAD"), "合入目标分支更新");
+  assert.equal(git(integrated.worktree, "show", "-s", "--format=%s", "HEAD^1"), "保存任务改动以同步目标分支");
+  assert.equal(
+    git(integrated.worktree, "show", "-s", "--format=%b", "HEAD"),
+    "任务编号：second\n任务尝试：1\n执行编号：2",
+  );
   const result = captureWorkspace(integrated);
   assert.notEqual(result.candidate, b.candidate);
   git(repository, "merge-base", "--is-ancestor", a.candidate, result.candidate);
