@@ -486,6 +486,12 @@
             "effort": {
               "type": "string"
             },
+            "networkAccess": {
+              "type": "boolean"
+            },
+            "webSearch": {
+              "enum": ["disabled", "cached", "live"]
+            },
             "access": {
               "enum": ["read", "edit", "full"]
             },

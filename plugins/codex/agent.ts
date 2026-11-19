@@ -12,6 +12,8 @@ export const IN_THE_APP = [
 
 export default {
   command: (turn) => {
+    if (turn.networkAccess !== undefined && turn.access !== "edit")
+      throw new Error("Codex 的 networkAccess 仅适用于工作区编辑权限");
     // The elevated Windows sandbox runs as CodexSandboxUsers. Share only the supplied data, never the run token or key.
     if (process.platform === "win32" && turn.contextFile)
       powershell(`
@@ -35,6 +37,11 @@ export default {
       `sandbox_mode="${SANDBOX[turn.access]}"`,
       "-c",
       'approval_policy="never"',
+      // 新轮次和续接共用本轮配置，允许联网不会扩大文件写入范围。
+      ...(turn.networkAccess !== undefined
+        ? ["-c", `sandbox_workspace_write.network_access=${turn.networkAccess}`]
+        : []),
+      ...(turn.webSearch !== undefined ? ["-c", `web_search="${turn.webSearch}"`] : []),
       ...(turn.resume ? [turn.resume] : []),
       "本轮通过后台 codex exec 运行，不要假定桌面应用的浏览器连接已带到本轮。" +
         "网页操作使用本轮实际可用的浏览器工具，或使用规则或 Skill 中已明确配置的浏览器入口。" +

@@ -12,6 +12,8 @@ export type Job = {
     use: string;
     model?: string;
     effort?: string;
+    networkAccess?: boolean;
+    webSearch?: "disabled" | "cached" | "live";
     access: string;
     command?: string[];
     program?: string;

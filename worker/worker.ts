@@ -280,6 +280,8 @@ export function createWorker({
       cwd,
       model: agent.model,
       effort: agent.effort,
+      networkAccess: agent.networkAccess,
+      webSearch: agent.webSearch,
       access: agent.access as Turn["access"],
       command: agent.command,
       program: agent.program,

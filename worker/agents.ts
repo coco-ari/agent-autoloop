@@ -19,6 +19,8 @@ export type Turn = {
   cwd: string;
   model?: string;
   effort?: string;
+  networkAccess?: boolean;
+  webSearch?: "disabled" | "cached" | "live";
   access: Access;
   command?: string[];
   /** The program a built-in plugin starts instead of the one it finds: a wrapper that sets things up and runs it. */

@@ -191,6 +191,13 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
       ["use", isId, ID_WORDS],
       ["model", isText, NOT_EMPTY, true],
       ["effort", isText, NOT_EMPTY, true],
+      ["networkAccess", (value) => typeof value === "boolean", "要是 true 或 false", true],
+      [
+        "webSearch",
+        (value) => ["disabled", "cached", "live"].includes(String(value)),
+        "只能是 disabled、cached、live",
+        true,
+      ],
       ["access", (value) => ACCESS.includes(value as string), `只能是 ${ACCESS.join("、")}`, true],
       ["command", isSomeWords, "要是命令行的列表", !isObject(agent) || agent.use !== "command"],
       ["program", isText, "要是一个程序的路径", true],

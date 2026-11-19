@@ -33,7 +33,7 @@ node --disable-warning=ExperimentalWarning --test --test-name-pattern='agent-aut
 | `link(session)`              | 可选，打开这个会话的链接。回执写错时，`read` 返回了 `session` 的插件都只重写回执，和有没有链接无关                            |
 | `check(program)`             | 可选，`doctor` 问它这个 Agent 现在能不能用：能用返回 `null`，否则返回下一步怎么做。参数是规则里给它写的 `program`，没写就不传 |
 
-`turn` 一定有的是 `prompt`、`session`、`resume`、`cwd`、`access`、`contextFile`、`folder`，另外四个只有规则里给这个 Agent 写了才有：`model`、`effort`、`command`、`program`。`resume` 是这一轮要接回的原会话，新开一轮时是 `null`。`contextFile` 是资料文件，受限 CLI 需要允许读取 `folder`。`program` 是内置插件换成的启动程序，第三方插件用不上，收下也可以不理。那四个都按「可能没有」来读，内置插件就是这么写的：`...(turn.model ? ["--model", turn.model] : [])`、`turn.command ?? []`。`read` 要能处理未写完的输出；CLI 真正完成后才返回 `text`。`read` 抛错或什么也不返回时，还在跑的接着跑，结束后这一轮算没跑成，留在原会话重派。
+`turn` 一定有的是 `prompt`、`session`、`resume`、`cwd`、`access`、`contextFile`、`folder`，另外这些只有规则里给这个 Agent 写了才有：`model`、`effort`、`command`、`program`、`networkAccess`、`webSearch`。`resume` 是这一轮要接回的原会话，新开一轮时是 `null`。`contextFile` 是资料文件，受限 CLI 需要允许读取 `folder`。`program` 是内置插件换成的启动程序，第三方插件用不上，收下也可以不理。可选字段都按「可能没有」来读，内置插件就是这么写的：`...(turn.model ? ["--model", turn.model] : [])`、`turn.command ?? []`。联网参数的适用范围见下文。`read` 要能处理未写完的输出；CLI 真正完成后才返回 `text`。`read` 抛错或什么也不返回时，还在跑的接着跑，结束后这一轮算没跑成，留在原会话重派。
 
 支持 `resume` 的插件，从 Agent 收下提示词起都要返回 `started: true`，包括运行中和出错之后。否则干到一半断了，也会被当成会话接不上，开新会话把业务重做一遍。返回了 `session` 就要按 `turn.resume` 接回原会话：没跑成的重派和写错回执的重写都靠它；接不回去的 CLI 不要返回 `session`。
 
@@ -54,6 +54,12 @@ Windows 原生运行支持 `.exe`/`.com`、PowerShell `.ps1` 和 npm 生成的 `
 只需要打印最后一条消息时，用内置 `command` 加参数数组即可，不必写插件。参数里可以用 `{prompt}`、`{model}`、`{effort}`、`{cwd}`、`{context}`，每个参数只替换一轮，替换进去的提示词原样传给程序：提示词里写着 `{cwd}` 或 `$&`，到程序那边也还是这几个字，不会被再替换一次。每个 Agent 进程（包括内置插件配的 `program` 脚本）都能读到环境变量 `AGENT_AUTOLOOP_CONTEXT`（资料文件）和 `AGENT_AUTOLOOP_RUN`（第几轮）。同一轮重试、重写回执时编号不变；回答和到期的复查是新的一轮，编号不同。
 
 DeepSeek Harness 有内置 `dsh` 插件，规则里写 `use: "dsh"`，要 0.2.2 或更新，`agent-autoloop doctor` 会查。现在 npm 的 `latest` 还是旧版，要这样装：`npm install -g @deepseek-ai/dsh@next --allow-scripts=koffi,node-pty,@deepseek-ai/dsh-subprocess-local`。新版 npm 默认不跑依赖的安装脚本，不放行这三个包，装完看着正常，一跑才出错。从旧版升上来的，0.2.2 可能读不到 `~/.dsh/.credentials.yaml` 里的 `refs`，报 `MISSING_CREDENTIAL`：把密钥放进环境变量，Linux 的系统服务放 `~/.config/environment.d/*.conf`。只上报 Token，不上报费用。有用户在 WSL2 上用 0.2.2-rc.1 和第三方 OpenAI 兼容服务实测跑通了问答、用量和 `resume`。它以 `dsh headless --json` 跑一轮，从 `session` 事件拿会话编号，用 `--session-id` 续接，把 `step_end` 的用量汇总为 Token，`final` 事件才算跑完；`access` 每次都映射成 `--permission-mode`，要人批准的调用用 `--approval-policy never` 直接拒绝。规则里的 `model`、`effort` 不起作用，用 DSH 自己的配置。没有可打开的桌面会话链接。DSH 默认把会话日志上传给 DeepSeek，见[它的说明](https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/cli/reference/README.md)。
+
+### 联网与网页搜索
+
+`turn.networkAccess` 和 `turn.webSearch` 是可选的可信岗位参数，Hub 随领取结果固定，Worker 在首次启动及续接时原样传递。当前 Codex 插件把它们映射为本轮 `sandbox_workspace_write.network_access` 和 `web_search` 配置，不改本机全局文件。命令联网只适用于 `edit`，其他权限显式填写该字段时拒绝启动，避免配置看似生效；网页搜索可为 `disabled`、`cached`、`live`，实际工具仍需模型服务支持。省略字段沿用原执行端设置；其他插件不能据此声称已经开放联网。
+
+允许命令联网后仍保留工作区和临时目录写入边界。安装依赖需要规则明确授权，并把包、缓存、临时文件和锁文件限定在任务目录；联网不意味着允许访问真实业务服务或全局安装。命令下载和搜索应分别做真实验证，不能把“生成了启动参数”当作“模型服务已经能搜索”。
 
 ### 浏览器接入
 
