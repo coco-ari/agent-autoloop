@@ -120,13 +120,15 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, `${where}的 workspace`, rule.workspace, [
       ["root", isFolder, FOLDER],
       ["ref", isText, NOT_EMPTY],
-      ["mode", (value) => ["develop", "review", "test"].includes(String(value)), "只能是 develop、review、test"],
+      [
+        "mode",
+        (value) => ["prepare", "develop", "review", "test"].includes(String(value)),
+        "只能是 prepare、develop、review、test",
+      ],
       ["passed", isText, NOT_EMPTY, true],
       ["failed", isText, NOT_EMPTY, true],
       ["reworkLimit", (value) => Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 3, "要是 0–3", true],
     ]);
-    if (rule.workspace.mode === "review" && rules.agents[rule.to]?.access !== "read")
-      issues.push(`${where}的审核岗位必须只读`);
     if (
       rule.workspace.mode === "test" &&
       (rules.agents[rule.to]?.use !== "command" ||

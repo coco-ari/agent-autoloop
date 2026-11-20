@@ -25,7 +25,7 @@ export type WorkspaceEvidence = {
   directory: string;
   base: string;
   candidate: string;
-  mode: "develop" | "review" | "test";
+  mode: "prepare" | "develop" | "review" | "test";
   command?: string[];
   exitCode?: number;
 };

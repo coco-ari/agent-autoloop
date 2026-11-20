@@ -32,6 +32,7 @@ import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from ".
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
 import { loadUsage, saveUsage, usageDelta, taskUsageDirectory } from "./usage.ts";
 import { prepareWorkspace, captureWorkspace, cleanupWorkspaces, type PreparedWorkspace } from "./workspaces.ts";
+import { workspacePrompt } from "./workspace-prompt.ts";
 import type { WorkspaceEvidence } from "../protocol/workspace.ts";
 import { inspectWorker } from "./report.ts";
 import { handoff } from "./handoff.ts";
@@ -272,9 +273,8 @@ export function createWorker({
       });
     const cwd = entry.workspace?.directory ?? rule.cwd.replace(/^~(?=[/\\])/, homedir());
     const turn: Turn = {
-      prompt: entry.workspace?.integration
-        ? `${prompt}\n\nWorker 代码准备结果：${entry.workspace.integration}`
-        : prompt,
+      // 回执修复只重写结果，不能再次附加读取源码和执行验证的业务指令。
+      prompt: [prompt, entry.repairs ? "" : workspacePrompt(entry.job, entry.workspace)].filter(Boolean).join("\n\n"),
       session: entry.session,
       resume: entry.resume,
       cwd,
@@ -289,6 +289,8 @@ export function createWorker({
       folder: entry.dir,
     };
     if (!existsSync(cwd)) throw new Error(`在 ${cwd} 启动不了：这个目录不存在`);
+    // 保存实际传给适配器的指令，随本轮所属目录清理；不复制 Worker 凭据或环境变量。
+    writeFileSync(path.join(entry.dir, `prompt-${entry.turn}.txt`), turn.prompt, { mode: 0o600 });
     const argv = adapter.command(turn);
     const { out, err, exit, command } = files(entry);
     if (process.platform === "win32") {

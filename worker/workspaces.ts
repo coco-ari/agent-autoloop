@@ -25,7 +25,7 @@ type Owned = {
   binding?: TaskWorkspaceBinding;
 };
 export type PreparedWorkspace = Owned & {
-  mode: "develop" | "review" | "test";
+  mode: "prepare" | "develop" | "review" | "test";
   worktree: string;
   run: number;
   requiresApproval: boolean;
@@ -120,7 +120,6 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
   const common = (where: string) => actual(path.resolve(where, git(where, "rev-parse", "--git-common-dir")));
   if (actual(git(directory, "rev-parse", "--show-toplevel")) !== directory || common(directory) !== common(repository))
     throw new Error("任务目录不属于原仓库");
-  let cwd = directory;
   let integration: string | undefined;
   if (config.mode === "develop" && binding?.target && value.candidate) {
     const head = fetchTarget(
@@ -160,31 +159,13 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
       }
     }
   }
-  if (config.mode !== "develop") {
+  if (config.mode === "review" || config.mode === "test") {
     if (
       !value.candidate ||
       git(directory, "rev-parse", "HEAD") !== value.candidate ||
       git(directory, "status", "--porcelain")
     )
       throw new Error("候选代码未固定或被修改，请重新开发提交");
-    if (config.mode === "review") {
-      cwd = path.join(parent, "review-" + job.run);
-      approved(cwd, roots);
-      mkdirSync(cwd, { recursive: true, mode: 0o700 });
-      // 直接审阅基准时，用空树差异提供固定提交的文本内容，仍不检出或执行仓库配置。
-      const scope = value.candidate === value.base ? "repository" : "changes";
-      const reviewBase = scope === "repository" ? git(repository, "mktree") : value.base;
-      writeFileSync(
-        path.join(cwd, "changes.txt"),
-        git(repository, "diff", "--no-ext-diff", "--no-textconv", reviewBase, value.candidate, "--"),
-        { mode: 0o600 },
-      );
-      writeFileSync(
-        path.join(cwd, "candidate.json"),
-        JSON.stringify({ base: value.base, candidate: value.candidate, scope }),
-        { mode: 0o600 },
-      );
-    }
   }
   const requiresApproval =
     config.mode === "develop" &&
@@ -196,7 +177,7 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
   return {
     ...value,
     mode: config.mode,
-    directory: cwd,
+    directory,
     worktree: directory,
     run: job.run,
     title: job.context.taskRequest?.original.summary,
@@ -217,9 +198,14 @@ export function captureWorkspace(prepared: PreparedWorkspace, summary?: string):
     value.candidate = candidate;
     value.developments = [...new Set([...(value.developments ?? []), prepared.run])];
     save(prepared.task, values);
+  } else if (prepared.mode === "prepare") {
+    // 准备阶段只交接材料；提交及开发证据仍由后续开发阶段生成。
+    if (git(prepared.worktree, "rev-parse", "HEAD") !== (candidate ?? prepared.base))
+      throw new Error("需求准备期间提交被改变，请核实任务代码");
+    candidate ??= prepared.base;
   } else if (
     git(prepared.worktree, "rev-parse", "HEAD") !== candidate ||
-    git(prepared.worktree, "diff", "HEAD", "--name-only")
+    git(prepared.worktree, "status", "--porcelain", "--untracked-files=all")
   ) {
     throw new Error("审核或测试期间候选代码被改变，结果不能作为通过依据");
   }

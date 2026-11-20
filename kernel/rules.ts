@@ -20,7 +20,7 @@ type RuleWords = { skill?: string; prompt?: string };
 export type TaskWorkspace = {
   root: string;
   ref: string;
-  mode: "develop" | "review" | "test";
+  mode: "prepare" | "develop" | "review" | "test";
   passed?: string;
   failed?: string;
   reworkLimit?: number;

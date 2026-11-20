@@ -28,7 +28,7 @@ const context=JSON.parse(readFileSync(process.env.AGENT_AUTOLOOP_CONTEXT,'utf8')
 const review=process.argv[2]==='review';
 const rework=context.events.some(e=>e.type==='test.failed');
 if(!review)writeFileSync('value.txt',context.events.some(e=>e.type==='test.failed')?'fixed':'broken');
-if(review&&!readFileSync('changes.txt','utf8').includes('value.txt'))throw Error('缺少审核快照');
+if(review&&(!readFileSync('value.txt','utf8')||!readFileSync('check.mjs','utf8').includes('fixed')))throw Error('审核无法读取完整源码');
 const events=review?[{id:'review',type:'review.passed',summary:'审核通过'}]:[{id:'code',type:'development.ready',summary:'代码完成'},{id:'checks',type:'development.ready',summary:'检查资料完成'}];
 console.log((review?'审核通过':rework?'修复测试发现的取值错误':'实现取值功能')+'\\n'+'\x60\x60\x60agent-autoloop\\n'+JSON.stringify({events})+'\\n\x60\x60\x60');`,
 );

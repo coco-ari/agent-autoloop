@@ -14,7 +14,7 @@ export function parseEvidence(value: any): WorkspaceEvidence {
     value.directory.length > 4096 ||
     !/^[a-f0-9]{40,64}$/.test(value.base) ||
     !/^[a-f0-9]{40,64}$/.test(value.candidate) ||
-    !["develop", "review", "test"].includes(value.mode) ||
+    !["prepare", "develop", "review", "test"].includes(value.mode) ||
     (value.command !== undefined &&
       (!Array.isArray(value.command) ||
         value.command.length > 64 ||
