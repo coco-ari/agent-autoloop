@@ -138,6 +138,52 @@ test("末岗成功保留原结果，无默认下游时仅派出已受理的队�
     }
 });
 
+test("等答卡或末岗无接收者时拒绝带文字继续，原暂停状态与回执不变", () => {
+  for (const waiting of ["card", "terminal"]) {
+    const h = fixture();
+    try {
+      const entry = h.rules.rules[0];
+      entry.to = waiting === "terminal" ? "a3" : "a1";
+      entry.emits = { source: "app", types: ["integration.done"] };
+      h.act("rules", h.rules);
+      h.create("guide");
+      const job = h.act("claimNext", "w1", "start");
+      const cmd = (action: string, id: string, text?: string) =>
+        h.act("controlTask", "guide", { action, attempt: 1, requestId: id, ...(text && { text }) });
+      if (waiting === "card") {
+        h.act("finish", job.run, job.token, {
+          outcome: "done",
+          ask: [{ key: "q", title: "确认", text: "确认范围", options: ["甲", "乙"], recommend: 0 }],
+        });
+        cmd("pause", "pause");
+      } else {
+        cmd("pause", "pause");
+        h.act("finish", job.run, job.token, {
+          outcome: "done",
+          events: [{ id: "terminal", type: "integration.done" }],
+        });
+      }
+      const before = snapshot(h.get());
+      assert.throws(
+        () => cmd("resume", "words", "附加文字"),
+        waiting === "card" ? /答原卡或选择接收岗位/ : /选岗改派或清空引导/,
+      );
+      assert.deepEqual(snapshot(h.get()), before);
+      assert.equal(taskView(h.get(), "guide")?.control.state, "paused");
+      assert.equal(cmd("resume", "empty").control.state, "active");
+      if (waiting === "card") {
+        const [card] = rows(h.get(), "cards", { state: "open", kind: "ask" });
+        h.act("answer", card.id, { text: "答原卡" });
+        const next = h.act("claimNext", "w1", "answer");
+        assert.equal(next.context.answers[0].text, "答原卡");
+        assert.ok(!JSON.stringify(next.context).includes("附加文字"));
+      } else assert.equal(h.act("claimNext", "w1", "empty"), null);
+    } finally {
+      h.get().close();
+    }
+  }
+});
+
 test("同来源两条入口的队列、修改和立即改派仅接受原入口可达岗位", () => {
   const h = fixture();
   try {

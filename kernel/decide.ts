@@ -1033,18 +1033,19 @@ function controlTask(draft: Draft, id: string, given: unknown) {
       if (control.state !== "paused" || control.locked) throw new Conflict("任务尚未确认暂停");
       const attemptKey = task.id + ":" + task.attempt;
       const handoff = draft.view.get("task_attempts", attemptKey)?.pending_handoff;
-      put(draft, "task_attempts", attemptKey, { pending_handoff: null });
       const previous = control.run && draft.view.get("runs", control.run);
+      const next =
+        previous && handoff === previous.id && !cards.length
+          ? control.queue.find((entry) => entry.state === "queued")
+          : undefined;
+      if (command.text && cards.length) throw new Conflict("当前正在等答卡，请答原卡或选择接收岗位立即改派。");
+      if (command.text && !next && (!previous || previous.state !== "cancelled") && waiting.length !== 1)
+        throw new Conflict("当前没有明确接收引导的岗位，请选岗改派或清空引导后继续。");
+      put(draft, "task_attempts", attemptKey, { pending_handoff: null });
       saveControl(draft, task, { state: "active", queue: control.queue });
       if (previous && previous.state === "cancelled")
         dispatchControl(draft, task, previous.rule, command.text || "继续本轮工作", command.requestId, previous.id);
-      else if (
-        previous &&
-        handoff === previous.id &&
-        !cards.length &&
-        control.queue.some((entry) => entry.state === "queued")
-      ) {
-        const next = control.queue.find((entry) => entry.state === "queued")!;
+      else if (next && previous) {
         for (const run of waiting)
           if (eventsOf(draft.view, run.id).some((event) => JSON.parse(previous.emitted ?? "[]").includes(event.id)))
             put(draft, "runs", run.id, {
