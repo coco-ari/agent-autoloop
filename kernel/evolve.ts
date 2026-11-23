@@ -4,6 +4,7 @@ export type Row = Record<string, any>;
 export const TABLES = [
   "tasks",
   "task_attempts",
+  "task_control_requests",
   "task_leases",
   "event_tombstones",
   "events",
@@ -189,7 +190,11 @@ export class View {
   }
 }
 export function keyOf(table: Table, row: Row): string {
-  if (["tasks", "task_attempts", "task_leases", "event_tombstones", "run_output_heads"].includes(table))
+  if (
+    ["tasks", "task_attempts", "task_control_requests", "task_leases", "event_tombstones", "run_output_heads"].includes(
+      table,
+    )
+  )
     return String(row.id);
   if (NUMBERED.has(table)) return String(row.id);
   if (table === "run_events") return `${row.run_id}:${row.event_id}`;

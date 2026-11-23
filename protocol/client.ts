@@ -49,6 +49,8 @@ export function hubClient(url: string, key: string) {
     taskList: (ids: string[]) => call("GET", `/v1/tasks?ids=${encodeURIComponent(ids.join(","))}`),
     taskEvent: (id: string, event: unknown, attempt = 1) =>
       call("POST", `/v1/tasks/${encodeURIComponent(id)}/events`, { body: { event, attempt } }),
+    controlTask: (id: string, body: unknown) =>
+      call("POST", "/v1/tasks/" + encodeURIComponent(id) + "/control", { body }),
     stopTask: (id: string, attempt = 1) =>
       call("POST", `/v1/tasks/${encodeURIComponent(id)}/stop`, { body: { attempt } }),
     restartTask: (id: string, body: { request: string; attempt: number; event: unknown }) =>

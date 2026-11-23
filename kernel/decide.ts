@@ -21,6 +21,7 @@ import {
   workers,
   taskView,
 } from "./query.ts";
+import { parseTaskControl, type TaskControl, type QueueItem } from "../protocol/task-control.ts";
 import { parseTask, taskEvent, taskIdentifier } from "../protocol/task.ts";
 import { OUTPUT_RUN_BYTES, parseOutput } from "../protocol/output.ts";
 import { parseEvidence } from "../protocol/workspace.ts";
@@ -266,7 +267,7 @@ function recordEvent(
   }).id;
 }
 
-function ingest(draft: Draft, source: string, given: unknown, sent = false, task_id?: string) {
+function ingest(draft: Draft, source: string, given: unknown, sent = false, task_id?: string, hold?: boolean) {
   const event = parseEvent(given);
   const task_attempt = task_id ? draft.view.get("tasks", task_id)?.attempt : undefined;
   if (task_id) {
@@ -291,12 +292,12 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, task
   // A paused rule doesn't take the event, and nothing is kept back for it: the event is recorded as skipped for it.
   const isPaused = (rule: Rule) => !!pauseOf(draft.view, rule, draft.now);
   const paused = matched.filter(isPaused).map((rule) => rule.name);
-  const taking = matched.filter((rule) => !isPaused(rule));
+  const taking = hold ? [] : matched.filter((rule) => !isPaused(rule));
   const id = recordEvent(
     draft,
     source,
     { ...event, ...(task_id && { task_id, task_attempt }) },
-    matched.map((rule) => rule.name),
+    hold ? [] : matched.map((rule) => rule.name),
     paused,
     sent,
   );
@@ -308,7 +309,13 @@ function ingest(draft: Draft, source: string, given: unknown, sent = false, task
     });
   }
   for (const rule of taking) enqueue(draft, rule, id, rule.parallel ? event.subject : "");
-  return { event: id, duplicate: false, routed: taking.map((rule) => rule.name), paused };
+  return {
+    event: id,
+    duplicate: false,
+    routed: taking.map((rule) => rule.name),
+    paused,
+    ...(hold !== undefined && { handoff: !tooDeep && (!matched.length || matched.some((rule) => !isPaused(rule))) }),
+  };
 }
 
 function heldRun(draft: Draft, id: number, token: string, states: string[]) {
@@ -374,6 +381,7 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   const claimable = (run: Row) =>
     run.state === "queued" &&
     !stoppedTask(draft, run) &&
+    (!run.task_id || controlOf(draft, run.task_id, run.task_attempt).state === "active") &&
     (boundWorker(draft.view, run)
       ? boundWorker(draft.view, run) === worker
       : agents.includes(ruleNamed(draft, run.rule)?.to ?? "")) &&
@@ -510,11 +518,27 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
     notify(draft, `run:${id}:done`, run.rule, summary, once);
   }
   for (const later of result.later ?? []) scheduleReview(draft, run, later);
+  const task = run.task_id ? draft.view.get("tasks", run.task_id) : undefined;
+  const control = task ? controlOf(draft, task.id, task.attempt) : undefined;
+  const waitingCard =
+    task &&
+    rows(draft.view, "cards", { task_id: task.id, task_attempt: task.attempt, kind: "ask", state: "open" }, 1).length;
+  const item =
+    control?.state === "active" && !waitingCard ? control.queue.find((entry) => entry.state === "queued") : undefined;
+  let handoff = result.outcome === "done" && !result.events?.length && !rule?.expected?.length && !result.later?.length;
   const emitted: number[] = [];
   for (const event of result.events ?? []) {
     if (rule?.emits && typeMatches(rule.emits.types, event.type)) {
       try {
-        const sent = ingest(draft, rule.emits.source, { ...event, hops: hopsOf(draft, run) + 1 }, false, run.task_id);
+        const sent = ingest(
+          draft,
+          rule.emits.source,
+          { ...event, hops: hopsOf(draft, run) + 1 },
+          false,
+          run.task_id,
+          Boolean(item || control?.locked),
+        );
+        if ("handoff" in sent && sent.handoff) handoff = true;
         // 已存在的事件不属于本次回执；归属冲突也不能丢弃整个执行的退出证据。
         if (!sent.duplicate) emitted.push(sent.event);
       } catch (error) {
@@ -525,6 +549,11 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   }
   // The source whose event this run took reads them back (`eventOutcome`); nothing else links them to the run.
   if (emitted.length) put(draft, "runs", id, { emitted: JSON.stringify(emitted) });
+  if (handoff && task && control && !waitingCard && !result.later?.length) {
+    if (item) dispatchItem(draft, task, control, item, run.id);
+    else if (control.state !== "active")
+      put(draft, "task_attempts", task.id + ":" + task.attempt, { pending_handoff: run.id });
+  }
   return rejected;
 }
 
@@ -570,8 +599,26 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
       cancel_at: null,
     });
     closeStopped(draft, id, "已停止");
+  } else if (
+    result.outcome === "failed" &&
+    run.task_id &&
+    controlOf(draft, run.task_id, run.task_attempt).state !== "active"
+  ) {
+    put(draft, "runs", id, {
+      state: "failed",
+      finished_at: draft.at,
+      error: result.error,
+      summary: result.summary ?? "",
+      cancel_at: null,
+    });
+    for (const notice of result.notice ?? []) cardFromReceipt(draft, run, "notice", notice);
   } else if (result.outcome === "failed") rejected = retryLater(draft, run, result);
   else rejected = applyReceipt(draft, run, result);
+  if (run.task_id) {
+    const control = controlOf(draft, run.task_id, run.task_attempt);
+    if (control.state !== "active" && control.state !== "paused")
+      settleControl(draft, draft.view.get("tasks", run.task_id)!, control);
+  }
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
   return { rejected };
 }
@@ -585,7 +632,8 @@ function answer(draft: Draft, id: number, given: Row) {
     const delivery = draft.view.get("deliveries", `${id}:${given.channel}`);
     if (!delivery?.ref || delivery.ref !== given.ref) throw new AuthError("不是发出去的那条消息");
   }
-  if (card.state !== "open") return { changed: false, state: card.state };
+  if (card.state !== "open") return { changed: false, state: card.state, ...(card.result && { result: card.result }) };
+  if (card.task_id && controlOf(draft, card.task_id, card.task_attempt).locked) throw new Conflict("任务正在人工改派");
   if (given.by !== undefined && (typeof given.by !== "string" || [...given.by].length > ANSWER_BY)) {
     throw new InputError(`回答人最多 ${ANSWER_BY} 字`);
   }
@@ -786,6 +834,236 @@ function requireAttempt(task: Row, attempt: unknown, allowStopped = false) {
   if (!allowStopped && task.stop_requested_at) throw new Conflict("任务已经请求停止");
 }
 
+function controlOf(draft: Draft, id: string, attempt: number): TaskControl {
+  return draft.view.get("task_attempts", id + ":" + attempt)?.control ?? { state: "active", queue: [] };
+}
+
+function saveControl(draft: Draft, task: Row, control: TaskControl) {
+  put(draft, "task_attempts", task.id + ":" + task.attempt, { control });
+}
+
+function reachableRule(draft: Draft, task: Row, name: string) {
+  const rule = ruleNamed(draft, name);
+  const entryType = task.entry_type ?? rows(draft.view, "events", { task_id: task.id, requested: 1 }, 1)[0]?.type;
+  const available = draft.rules.rules.filter(eventRule).filter((candidate) => candidate.when.source === task.source);
+  const pending = available.filter((candidate) => typeMatches(candidate.when.types, entryType));
+  const visited = new Set<string>();
+  while (pending.length) {
+    const current = pending.pop()!;
+    if (visited.has(current.name)) continue;
+    visited.add(current.name);
+    if (!current.emits || current.emits.source !== task.source) continue;
+    for (const candidate of available) {
+      if (
+        !visited.has(candidate.name) &&
+        current.emits.types.some(
+          (type) =>
+            typeMatches(candidate.when.types, type) ||
+            candidate.when.types.some((pattern) => typeMatches([type], pattern)),
+        )
+      )
+        pending.push(candidate);
+    }
+  }
+  return rule && visited.has(name) && draft.rules.agents[rule.to] ? rule : undefined;
+}
+
+function controlRule(draft: Draft, task: Row, name: string) {
+  const rule = reachableRule(draft, task, name);
+  if (!rule) throw new Conflict("接收岗位不在本任务已发布的流程内");
+  return rule;
+}
+
+function dispatchControl(draft: Draft, task: Row, target: string, text: string, request: string, parent?: number) {
+  const rule = controlRule(draft, task, target);
+  const event = recordEvent(
+    draft,
+    task.source,
+    {
+      id: "control:" + request,
+      type: "task.guidance",
+      subject: task.id,
+      summary: "人工任务指令",
+      detail: text,
+      task_id: task.id,
+      task_attempt: task.attempt,
+    },
+    [target],
+  );
+  put(draft, "events", event, { requested: 1 });
+  const previous = rows(
+    draft.view,
+    "runs",
+    { task_id: task.id, task_attempt: task.attempt, rule: target },
+    undefined,
+    true,
+  ).find((run) => run.agent === rule.to && (run.session || run.resume));
+  const run = enqueue(draft, rule, event, "", previous?.session ?? previous?.resume);
+  if (parent) {
+    const source = draft.view.get("runs", parent)!;
+    put(draft, "runs", parent, { emitted: JSON.stringify([...JSON.parse(source.emitted ?? "[]"), event]) });
+  }
+  return run;
+}
+
+function dispatchItem(draft: Draft, task: Row, control: TaskControl, item: QueueItem, parent?: number) {
+  if (!reachableRule(draft, task, item.target)) {
+    saveControl(draft, task, {
+      ...control,
+      state: control.locked ? "redirecting" : "paused",
+      ...(parent && { run: parent }),
+    });
+    put(draft, "task_attempts", task.id + ":" + task.attempt, { pending_handoff: parent });
+    notify(draft, "control:" + task.id + ":" + item.id, "接收岗位已不可用", "请核对该入口的已发布岗位。", {
+      task_id: task.id,
+      task_attempt: task.attempt,
+      once: true,
+      fyi: true,
+    });
+    return;
+  }
+  const run = dispatchControl(draft, task, item.target, item.text, item.id, parent);
+  saveControl(draft, task, {
+    state: "active",
+    queue: control.queue.map((entry) => (entry.id === item.id ? { ...entry, state: "dispatched", run } : entry)),
+  });
+}
+
+function settleControl(draft: Draft, task: Row, control: TaskControl) {
+  const scope = { task_id: task.id, task_attempt: task.attempt };
+  if (rows(draft.view, "runs", { ...scope, state: ["claimed", "unknown"] }).length) return;
+  if (!control.locked) {
+    saveControl(draft, task, { ...control, state: "paused" });
+    return;
+  }
+  const item = control.queue.find((entry) => entry.id === control.locked)!;
+  for (const card of rows(draft.view, "cards", { ...scope, state: "open", kind: "ask" }))
+    closeCard(draft, card, "已由人工改派");
+  for (const run of rows(draft.view, "runs", { ...scope, state: "queued" }))
+    put(draft, "runs", run.id, {
+      state: "cancelled",
+      controlled: true,
+      finished_at: draft.at,
+      summary: "已由人工改派",
+    });
+  for (const timer of rows(draft.view, "timers", { ...scope, event_id: null })) set(draft, "timers", timer.id, null);
+  dispatchItem(draft, task, control, item, control.run);
+}
+
+function controlTask(draft: Draft, id: string, given: unknown) {
+  const command = parseTaskControl(given);
+  const task = draft.view.get("tasks", taskIdentifier(id));
+  if (!task) throw new NotFound("没有这个任务");
+  const key = [id, command.attempt, command.requestId].join(":");
+  const hash = digest(JSON.stringify(command));
+  const prior = draft.view.get("task_control_requests", key);
+  if (prior) {
+    if (prior.hash !== hash) throw new Conflict("相同请求号对应不同任务操作");
+    return { id, project: task.project, attempt: command.attempt, control: controlOf(draft, id, command.attempt) };
+  }
+  requireAttempt(task, command.attempt);
+  const control = controlOf(draft, id, task.attempt);
+  const scope = { task_id: id, task_attempt: task.attempt };
+  const runs = rows(draft.view, "runs", scope);
+  const running = runs.filter((run) => ["claimed", "unknown"].includes(run.state));
+  const waiting = runs.filter((run) => run.state === "queued");
+  const cards = rows(draft.view, "cards", { ...scope, state: "open", kind: "ask" });
+  const item = control.queue.find((entry) => entry.id === command.item);
+  if (command.target) controlRule(draft, task, command.target);
+  if (command.action === "redirect" && item) controlRule(draft, task, item.target);
+  if (command.item && item?.state !== "queued") throw new Conflict("这条消息已经锁定、派出或删除，请刷新任务");
+  switch (command.action) {
+    case "queue":
+      if (control.state === "active" && !running.length && !waiting.length && !cards.length)
+        throw new Conflict("此任务已经结束");
+      saveControl(draft, task, {
+        ...control,
+        queue: [
+          ...control.queue,
+          {
+            id: command.requestId,
+            target: command.target!,
+            text: command.text!,
+            state: "queued",
+          },
+        ],
+      });
+      break;
+    case "edit":
+    case "remove":
+      saveControl(draft, task, {
+        ...control,
+        queue: control.queue.flatMap((entry) =>
+          entry.id !== command.item
+            ? [entry]
+            : command.action === "remove"
+              ? []
+              : [{ ...entry, target: command.target!, text: command.text! }],
+        ),
+      });
+      break;
+    case "pause":
+    case "redirect": {
+      if (control.locked || (command.action === "pause" && control.state !== "active"))
+        throw new Conflict("当前控制操作尚未结束");
+      if (!running.length && !waiting.length && !cards.length && control.state === "active")
+        throw new Conflict("此任务已经结束");
+      const actual = running[0] ?? waiting[0] ?? runs.find((run) => run.id === cards[0]?.run_id);
+      const isScript = (run: Row) => configuration(draft.view, run.rules_version).agents[run.agent]?.use === "command";
+      const next: TaskControl = {
+        ...control,
+        run: actual?.id ?? control.run,
+        rule: actual?.rule ?? control.rule,
+        state: running.some(isScript) ? "waiting-script" : item ? "redirecting" : "pausing",
+        ...(item && {
+          locked: item.id,
+          queue: control.queue.map((entry) => (entry.id === item.id ? { ...entry, state: "locked" } : entry)),
+        }),
+      };
+      saveControl(draft, task, next);
+      for (const run of running)
+        put(draft, "runs", run.id, {
+          ...((!isScript(run) || item) && { controlled: true }),
+          ...(!isScript(run) && { cancel_at: run.cancel_at ?? draft.at }),
+        });
+      settleControl(draft, task, next);
+      break;
+    }
+    case "resume": {
+      if (control.state !== "paused" || control.locked) throw new Conflict("任务尚未确认暂停");
+      const attemptKey = task.id + ":" + task.attempt;
+      const handoff = draft.view.get("task_attempts", attemptKey)?.pending_handoff;
+      put(draft, "task_attempts", attemptKey, { pending_handoff: null });
+      const previous = control.run && draft.view.get("runs", control.run);
+      saveControl(draft, task, { state: "active", queue: control.queue });
+      if (previous && previous.state === "cancelled")
+        dispatchControl(draft, task, previous.rule, command.text || "继续本轮工作", command.requestId, previous.id);
+      else if (
+        previous &&
+        handoff === previous.id &&
+        !cards.length &&
+        control.queue.some((entry) => entry.state === "queued")
+      ) {
+        const next = control.queue.find((entry) => entry.state === "queued")!;
+        for (const run of waiting)
+          if (eventsOf(draft.view, run.id).some((event) => JSON.parse(previous.emitted ?? "[]").includes(event.id)))
+            put(draft, "runs", run.id, {
+              state: "cancelled",
+              controlled: true,
+              finished_at: draft.at,
+              summary: "按人工队列交接",
+            });
+        dispatchItem(draft, task, control, next, previous.id);
+        if (command.text) dispatchControl(draft, task, next.target, command.text, command.requestId);
+      } else if (command.text && waiting.length)
+        dispatchControl(draft, task, waiting[0].rule, command.text, command.requestId);
+      break;
+    }
+  }
+  put(draft, "task_control_requests", key, { id: key, task_id: id, task_attempt: task.attempt, hash });
+  return taskView(draft.view, id);
+}
+
 function finishDeletion(draft: Draft, id: string) {
   const task = draft.view.get("tasks", id)!;
   if (!task.delete_requested_at || task.deleted_at || taskView(draft.view, id)!.pendingRuns.length) return;
@@ -804,6 +1082,7 @@ function finishDeletion(draft: Draft, id: string) {
 
 /** Every input there is, each with its arguments named. What one returns is what the caller is told. */
 const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
+  controlTask,
   createTask(draft, given) {
     const { stopped, ...input } = parseTask(given);
     const hash = digest(JSON.stringify(input));
@@ -820,6 +1099,7 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
       project: input.project,
       source: input.source,
       input_hash: hash,
+      entry_type: input.event.type,
       ...(input.workspace ? { workspace: input.workspace } : {}),
       created_at: draft.at,
       stop_requested_at: null,
@@ -923,6 +1203,14 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     for (const run of rows(draft.view, "runs", { state: "queued" })) {
       if (ruleOf(rules, run.rule)) assignQueued(draft, run);
       else stopRun(draft, run, "rule-gone", ...ruleGone(run));
+    }
+    draft.rules = rules;
+    for (const attempt of rows(draft.view, "task_attempts")) {
+      const task = draft.view.get("tasks", attempt.task_id);
+      if (!task || task.stop_requested_at || task.attempt !== attempt.attempt || !attempt.control?.locked) continue;
+      const control = controlOf(draft, task.id, task.attempt);
+      const locked = control.queue.find((item) => item.id === control.locked);
+      if (locked && reachableRule(draft, task, locked.target)) settleControl(draft, task, control);
     }
     closeOpen(draft, (key) => key.startsWith("rules:"), "改好了");
   },

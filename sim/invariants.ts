@@ -10,6 +10,7 @@ export function replay(log: Fact[]): Snapshot {
     [
       "tasks",
       "task_attempts",
+      "task_control_requests",
       "task_leases",
       "event_tombstones",
       "events",

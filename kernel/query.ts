@@ -154,7 +154,11 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
         (event) => event.id <= Math.max(0, ...eventIds),
       )
     : [];
-  const requestView = (event: Row) => ({ summary: event.summary, detail: event.detail });
+  const requestView = (event: Row) => ({
+    summary: event.summary,
+    detail: event.detail,
+    ...(event.link && { link: event.link }),
+  });
   return {
     run: run.id,
     ...(run.task_id && {
@@ -236,6 +240,7 @@ export function taskView(view: View, id: string) {
   return {
     id,
     attempt: task.attempt,
+    control: view.get("task_attempts", id + ":" + task.attempt)?.control ?? { state: "active", queue: [] },
     pendingWorkers: [
       ...new Set(
         rows(view, "task_leases", { task_id: id })
@@ -312,6 +317,7 @@ export function taskDetails(view: View, id: string, env: Environment) {
         id: run.id,
         attempt: run.task_attempt,
         executionAttempt: run.attempts,
+        ...(run.controlled && { controlled: true }),
         ...(run.evidence && { evidence: run.evidence }),
         rule: run.rule,
         agent: run.agent,

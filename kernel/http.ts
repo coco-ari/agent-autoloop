@@ -375,9 +375,8 @@ async function route(call: Call): Promise<Response> {
         .map((id) => taskDetails(view, id, services.environment)),
     });
   }
-  const task = /^\/v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/(stop|events|restart|cleanup|details))?$/.exec(
-    path,
-  );
+  const task =
+    /^\/v1\/tasks\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})(?:\/(stop|events|restart|cleanup|details|control))?$/.exec(path);
   if (task && ["GET", "POST", "DELETE"].includes(method)) {
     if (method === "POST" && task[2] === "cleanup")
       return json(act(call, "cleanupTask", requireKey(call, "worker"), task[1]));
@@ -385,6 +384,8 @@ async function route(call: Call): Promise<Response> {
     if (method === "GET" && task[2] === "details")
       return json(taskDetails(services.view(), task[1], services.environment));
     if (method === "DELETE" && !task[2]) return json(act(call, "deleteTask", task[1]));
+    if (method === "POST" && task[2] === "control")
+      return json(act(call, "controlTask", task[1], await readJson(request)));
     if (method === "POST" && task[2] === "restart")
       return json(act(call, "restartTask", task[1], await readJson(request)));
     if (method === "GET" && !task[2]) {

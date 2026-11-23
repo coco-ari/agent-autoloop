@@ -24,7 +24,7 @@ export type Job = {
   context: {
     taskRequest?: {
       explicit: boolean;
-      original: { summary: string; detail: string };
+      original: { summary: string; detail: string; link?: string };
       changes: { summary: string; detail: string }[];
       earlierChanges: number;
     };
