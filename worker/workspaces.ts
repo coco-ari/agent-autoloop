@@ -1,6 +1,16 @@
 // 任务目录由可信规则和任务身份派生；事件、模型回答不能决定路径或删除范围。
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  rmdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { homedir } from "node:os";
 import { HOME } from "../host/home.ts";
@@ -215,12 +225,34 @@ export function captureWorkspace(prepared: PreparedWorkspace, summary?: string):
 export function cleanupWorkspaces(task: string, roots: readonly string[]) {
   for (const value of read(task)) {
     verifyOwned(value, task, roots);
-    if (existsSync(value.directory)) {
+    // 同时核对本机独占路径和原仓库登记，允许 Git 已注销但文件尚未删完的任务继续清理。
+    const registered = git(value.repository, "worktree", "list", "--porcelain", "-z")
+      .split("\0")
+      .filter((field) => field.startsWith("worktree "))
+      .map((field) => path.resolve(field.slice(9)));
+    if (
+      inside(value.parent, value.repository) ||
+      inside(value.repository, value.parent) ||
+      registered.some((dir) => dir !== value.directory && inside(value.parent, dir))
+    )
+      throw new Error("任务目录包含其他 Git 工作树");
+    const marker = path.join(value.directory, ".git");
+    const metadata = lstatSync(marker, { throwIfNoEntry: false });
+    if (metadata) {
+      if (!registered.includes(value.directory) || !metadata.isFile()) throw new Error("任务目录的 Git 登记不匹配");
       const common = (where: string) => actual(path.resolve(where, git(where, "rev-parse", "--git-common-dir")));
       if (common(value.directory) !== common(value.repository)) throw new Error("拒绝删除不属于原仓库的目录");
-      git(value.repository, "worktree", "remove", "--force", value.directory);
+    } else if (registered.includes(value.directory) && existsSync(value.directory)) {
+      // Git 仍登记了空壳路径；先保留剩余文件，待 Git 从原仓库注销后再一起清除。
+      renameSync(value.directory, path.join(value.parent, "tree.deleting"));
     }
+    if (registered.includes(value.directory)) git(value.repository, "worktree", "remove", "--force", value.directory);
     if (existsSync(value.parent)) rmSync(value.parent, { recursive: true, force: true });
+    try {
+      rmdirSync(path.dirname(value.parent));
+    } catch (error) {
+      if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+    }
     if (value.binding?.target)
       git(value.repository, "update-ref", "-d", `refs/task-targets/${hash(task)}/${value.attempt}`);
   }

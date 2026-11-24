@@ -1,6 +1,6 @@
 // 用真实 Git 验证同任务共用源码、跨任务隔离及审核不改候选，防止只给差异导致无法审核和误删原仓库。
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
@@ -104,4 +104,24 @@ test("主动要求修改不重复询问次数授权，旧人工要求不能放�
   next.context.taskRequest.explicit = false;
   assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, true);
   cleanupWorkspaces("manual-rework", [approved]);
+});
+
+test("清理可从 Git 注销和文件删除之间恢复，保留其他任务和原仓库", () => {
+  const other = prepareWorkspace(job("keep-other", "prepare"), [approved])!;
+  for (const registered of [true, false]) {
+    const id = "interrupted-" + registered;
+    const own = prepareWorkspace(job(id, "prepare"), [approved])!;
+    if (registered) rmSync(join(own.directory, ".git"));
+    else {
+      git("worktree", "remove", "--force", own.directory);
+      mkdirSync(own.directory);
+    }
+    writeFileSync(join(own.directory, "残留.txt"), "中断");
+    cleanupWorkspaces(id, [approved]);
+    cleanupWorkspaces(id, [approved]);
+    assert.equal(existsSync(own.parent), false);
+    assert.ok(existsSync(join(other.directory, ".git")));
+    assert.ok(existsSync(join(repository, ".git")));
+  }
+  cleanupWorkspaces("keep-other", [approved]);
 });

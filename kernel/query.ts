@@ -237,17 +237,19 @@ export function taskView(view: View, id: string) {
       : pending.length
         ? "stopping"
         : "stopped";
+  const outstanding = rows(view, "task_leases", { task_id: id }).filter((row) => !row.cleaned);
+  const problems =
+    state === "deleting"
+      ? outstanding
+          .filter((row) => row.cleanup_problem)
+          .map((row) => (view.get("config", "worker:" + row.worker)?.name ?? row.worker) + "：" + row.cleanup_problem)
+      : [];
   return {
     id,
+    cleanupProblem: problems.length ? problems.join("；") : undefined,
     attempt: task.attempt,
     control: view.get("task_attempts", id + ":" + task.attempt)?.control ?? { state: "active", queue: [] },
-    pendingWorkers: [
-      ...new Set(
-        rows(view, "task_leases", { task_id: id })
-          .filter((row) => !row.cleaned)
-          .map((row) => row.worker),
-      ),
-    ],
+    pendingWorkers: [...new Set(outstanding.map((row) => row.worker))],
     project: task.project,
     source: task.source,
     state,
@@ -258,7 +260,7 @@ export function taskView(view: View, id: string) {
   };
 }
 
-export function taskDetails(view: View, id: string, env: Environment) {
+export function taskDetails(view: View, id: string, env: Environment, now?: number) {
   const task = taskView(view, id);
   if (!task) throw new NotFound("没有这个任务");
   if (task.state === "deleted") return task;
@@ -308,6 +310,18 @@ export function taskDetails(view: View, id: string, env: Environment) {
   });
   return {
     ...task,
+    ...(task.state === "deleting" &&
+      !task.cleanupProblem &&
+      now !== undefined && {
+        cleanupProblem: task.pendingWorkers
+          ?.map((worker) => {
+            const seen = view.get("seen", "worker:" + worker);
+            const label = view.get("config", "worker:" + worker)?.name ?? worker;
+            if (!seen || now - Date.parse(seen.seen_at) >= 180000) return label + "：节点离线，等待重新连接";
+            return label + (task.pendingRuns.length ? "：正在核实执行已停止" : "：等待节点确认清理");
+          })
+          .join("；"),
+      }),
     executions: runs.map((run) => {
       // 历史岗位取领取配置，事件关系只在本任务的事实中连接，不按模型填写的资料猜测。
       const agent = configuration(view, run.rules_version).agents[run.agent];

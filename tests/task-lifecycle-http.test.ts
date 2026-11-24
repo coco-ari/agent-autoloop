@@ -127,6 +127,7 @@ test("真实执行、停止后重新执行、删除与清理应答丢失恢复",
     assert.equal((await owner.deleteTask("one")).state, "deleting");
     await worker.tick();
     assert.equal(calls, 0);
+    assert.match((await owner.task("one")).cleanupProblem, /清理目录的任务归属不匹配/);
     assert.equal((await owner.task("one")).state, "deleting");
     assert.equal(readdirSync(runsRoot).length, 2);
     writeFileSync(ownerFile, savedOwner);

@@ -1188,6 +1188,15 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     finishDeletion(draft, id);
     return taskView(draft.view, id);
   },
+  cleanupProblem(draft, worker, id, reason) {
+    const task = draft.view.get("tasks", taskIdentifier(id));
+    if (!task?.delete_requested_at || task.deleted_at) throw new Conflict("任务没有待办清理");
+    const lease = rows(draft.view, "task_leases", { task_id: id, worker }).find((row) => !row.cleaned);
+    if (!lease) throw new AuthError("没有属于此 Worker 的清理项");
+    if (typeof reason !== "string" || !reason.trim() || reason.length > 240) throw new InputError("清理原因无效");
+    if (lease.cleanup_problem !== reason) put(draft, "task_leases", lease.id, { cleanup_problem: reason });
+    return { recorded: true };
+  },
   cleanupTask(draft, worker, id) {
     const task = draft.view.get("tasks", taskIdentifier(id));
     if (!task) throw new NotFound("没有这个任务");

@@ -56,6 +56,8 @@ export function hubClient(url: string, key: string) {
     restartTask: (id: string, body: { request: string; attempt: number; event: unknown }) =>
       call("POST", "/v1/tasks/" + encodeURIComponent(id) + "/restart", { body }),
     deleteTask: (id: string) => call("DELETE", "/v1/tasks/" + encodeURIComponent(id)),
+    cleanupProblem: (id: string, reason: string) =>
+      call("POST", "/v1/tasks/" + encodeURIComponent(id) + "/cleanup-problem", { body: { reason } }),
     cleanupTask: (id: string) => call("POST", "/v1/tasks/" + encodeURIComponent(id) + "/cleanup", { body: {} }),
     // The worker's door.
     work({ claim, wait, running, capacity }: { claim: string; wait: number; running: number[]; capacity: boolean }) {

@@ -83,7 +83,7 @@ type Entry = {
   evidence?: WorkspaceEvidence;
 };
 export type WorkerHub = Pick<Hub, "work" | "started" | "result"> &
-  Partial<Pick<Hub, "cleanupTask" | "output" | "evidence" | "reportWorker">>;
+  Partial<Pick<Hub, "cleanupTask" | "cleanupProblem" | "output" | "evidence" | "reportWorker">>;
 export type WorkerOptions = {
   hub: WorkerHub;
   name: string;
@@ -825,6 +825,9 @@ export function createWorker({
           await cleanup(request);
         } catch (error) {
           sayOnce(`任务清理尚未完成：${error}`);
+          await hub
+            .cleanupProblem?.(request.task, cleanupFailure(error))
+            .catch((cause) => sayOnce(`清理原因尚未送达：${cause}`));
         }
       }
       if (Number.isInteger(answer?.capacity) && answer.capacity >= 1 && answer.capacity <= 32)
@@ -865,6 +868,8 @@ export function createWorker({
       if (!Number.isSafeInteger(item.run) || item.run < 1 || !Number.isSafeInteger(item.attempt) || item.attempt < 1)
         throw new Error("清理执行身份不正确");
       const dir = ownedDirectory(RUNS, `${item.run}-${item.attempt}`);
+      const retiring = ownedDirectory(RUNS, `${item.run}-${item.attempt}.deleting`);
+      if (retiring) rmSync(retiring, { recursive: true, force: true });
       if (!dir) continue;
       const owner = JSON.parse(readFileSync(path.join(dir, "owner.json"), "utf8"));
       if (owner.task !== request.task || owner.run !== item.run || owner.attempt !== item.attempt)
@@ -873,12 +878,17 @@ export function createWorker({
         const entry: Entry = JSON.parse(readFileSync(path.join(dir, "entry.json"), "utf8"));
         if ((await groupAlive(entry)) !== false) throw new Error("尚未核实本机进程结束");
       }
-      rmSync(dir, { recursive: true, force: true });
+      renameSync(dir, dir + ".deleting");
+      rmSync(dir + ".deleting", { recursive: true, force: true });
     }
     const ownUsage = ownedDirectory(path.dirname(usage), path.basename(usage));
     if (ownUsage) rmSync(ownUsage, { recursive: true, force: true });
     cleanupWorkspaces(request.task, roots);
-    await hub.cleanupTask(request.task);
+    try {
+      await hub.cleanupTask(request.task);
+    } catch (error) {
+      throw new Error("本机清理已完成，等待 Hub 确认", { cause: error });
+    }
   }
 
   /** Output of finished runs is kept a while for looking into, then goes. */
@@ -902,4 +912,17 @@ export function createWorker({
   }
 
   return { tick, run, entries, tidy };
+}
+
+function cleanupFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "本机清理失败，需检查 Worker 日志";
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === "EBUSY" || code === "ENOTEMPTY") return "任务文件仍被占用或目录未能清空";
+  if (code === "EACCES" || code === "EPERM") return "系统拒绝删除任务文件，请检查文件权限或占用";
+  if (code === "ENOENT") return "清理所需的本机文件或 Git 程序缺失";
+  if (error instanceof SyntaxError) return "本机清理登记文件损坏";
+  // 仅上报程序定义的原因，命令行、仓库路径和子进程原始输出留在本机。
+  if (/^[\u4e00-\u9fff][\u4e00-\u9fffA-Za-z ，]{1,90}$/.test(error.message)) return error.message;
+  if (error.message.startsWith("Command failed: git ")) return "Git 无法核对或移除该工作树，请检查本机登记、占用与权限";
+  return "本机清理失败，需检查 Worker 日志";
 }
