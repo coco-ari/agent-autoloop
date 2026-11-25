@@ -88,7 +88,11 @@ function verifyOwned(value: Owned, task: string, roots: readonly string[]) {
   approved(value.repository, roots);
 }
 
-export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWorkspace | undefined {
+export async function prepareWorkspace(
+  job: Job,
+  roots: readonly string[],
+  cancelled?: () => Promise<boolean>,
+): Promise<PreparedWorkspace | undefined> {
   const config = job.rule.workspace;
   if (!config) return;
   if (!job.task) throw new Error("独占目录只用于有身份的任务");
@@ -110,8 +114,12 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
       parent,
       directory,
       base: binding?.target
-        ? fetchTarget(repository, binding.target, `refs/task-targets/${hash(job.task.id)}/${job.task.attempt}`, (dir) =>
-            approved(dir, roots),
+        ? await fetchTarget(
+            repository,
+            binding.target,
+            `refs/task-targets/${hash(job.task.id)}/${job.task.attempt}`,
+            (dir) => approved(dir, roots),
+            cancelled,
           )
         : git(repository, "rev-parse", "--verify", `${binding?.ref ?? config.ref}^{commit}`),
       ...(binding ? { binding } : {}),
@@ -132,40 +140,48 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
     throw new Error("任务目录不属于原仓库");
   let integration: string | undefined;
   if (config.mode === "develop" && binding?.target && value.candidate) {
-    const head = fetchTarget(
-      repository,
-      binding.target,
-      `refs/task-targets/${hash(job.task.id)}/${job.task.attempt}`,
-      (dir) => approved(dir, roots),
-    );
-    if (!ancestor(repository, value.base, head)) throw new Error("目标分支历史已重写，停止自动整合，请核实目标历史");
+    const merging = existsSync(path.resolve(directory, git(directory, "rev-parse", "--git-path", "MERGE_HEAD")));
     const conflicts = git(directory, "ls-files", "--unmerged");
-    if (conflicts)
-      integration = `目标分支整合存在冲突。保留双方有效改动，解决并 git add 冲突文件；由 Worker 固定合并候选。当前基准 ${value.base}。`;
-    else if (!ancestor(repository, head, git(directory, "rev-parse", "HEAD"))) {
-      // 先保全上一轮提问前的修改，禁止用 reset 或清空目录来同步主线。
-      const identity = { task: job.task.id, attempt: job.task.attempt, run: job.run };
-      checkpoint(directory, commitMessage("保存任务改动以同步目标分支", identity));
-      value.base = head;
-      save(job.task.id, values);
-      try {
-        git(
-          directory,
-          ...commitOptions,
-          "-c",
-          "merge.autoStash=false",
-          "merge",
-          "--ff",
-          "--no-edit",
-          "--no-verify",
-          "-m",
-          commitMessage("合入目标分支更新", identity),
-          head,
-        );
-        integration = `已整合目标分支的新提交 ${head}。当前候选已包含该提交。`;
-      } catch (error) {
-        if (!git(directory, "ls-files", "--unmerged")) throw error;
-        integration = `已开始整合目标分支 ${head}，存在冲突。解决并 git add 冲突文件，保留双方有效修改；Worker 将固定候选。`;
+    if (merging || conflicts) {
+      integration = conflicts
+        ? "原任务仍有合并冲突，请用 git status 查看，解决并暂存后自测。"
+        : "原任务合并已暂存，请核对结果并自测，由 Worker 固定合并候选。";
+    } else if (
+      job.context.events.some((event) => event.subject === job.task!.id && config.integrateOn?.includes(event.type))
+    ) {
+      const head = await fetchTarget(
+        repository,
+        binding.target,
+        `refs/task-targets/${hash(job.task.id)}/${job.task.attempt}`,
+        (dir) => approved(dir, roots),
+        cancelled,
+      );
+      if (!ancestor(repository, value.base, head)) throw new Error("目标分支历史已重写，停止自动整合，请核实目标历史");
+      if (!ancestor(repository, head, git(directory, "rev-parse", "HEAD"))) {
+        // 先保全上一轮提问前的修改，禁止用 reset 或清空目录来同步主线。
+        const identity = { task: job.task.id, attempt: job.task.attempt, run: job.run };
+        checkpoint(directory, commitMessage("保存任务改动以同步目标分支", identity));
+        value.base = head;
+        save(job.task.id, values);
+        try {
+          git(
+            directory,
+            ...commitOptions,
+            "-c",
+            "merge.autoStash=false",
+            "merge",
+            "--ff",
+            "--no-edit",
+            "--no-verify",
+            "-m",
+            commitMessage("合入目标分支更新", identity),
+            head,
+          );
+          integration = `已整合目标分支的新提交 ${head}。当前候选已包含该提交。`;
+        } catch (error) {
+          if (!git(directory, "ls-files", "--unmerged")) throw error;
+          integration = `已开始整合目标分支 ${head}，存在冲突。解决并 git add 冲突文件，保留双方有效修改；Worker 将固定候选。`;
+        }
       }
     }
   }

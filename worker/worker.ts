@@ -31,6 +31,7 @@ import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
 import { adapterFor, type Adapter, type Reading, type Turn, type Usage } from "./agents.ts";
 import { promptFor, readMessage, repairPrompt, resultFrom } from "./contract.ts";
 import { loadUsage, saveUsage, usageDelta, taskUsageDirectory } from "./usage.ts";
+import { FetchCancelled } from "./branch.ts";
 import { prepareWorkspace, captureWorkspace, cleanupWorkspaces, type PreparedWorkspace } from "./workspaces.ts";
 import { workspacePrompt } from "./workspace-prompt.ts";
 import type { WorkspaceEvidence } from "../protocol/workspace.ts";
@@ -248,7 +249,20 @@ export function createWorker({
     save(entry);
     const { rule, agent } = entry.job;
     if (rule.workspace && !entry.workspace) {
-      entry.workspace = prepareWorkspace(entry.job, roots);
+      try {
+        entry.workspace = await prepareWorkspace(entry.job, roots, async () => {
+          const answer = await hub.work({
+            claim,
+            wait: 0,
+            running: entries().map((item) => item.run),
+            capacity: false,
+          });
+          return Boolean(answer?.cancel?.includes(entry.run));
+        });
+      } catch (error) {
+        if (error instanceof FetchCancelled) return endWith(entry, { outcome: "cancelled", summary: error.message });
+        throw error;
+      }
       save(entry);
     }
     if (entry.job.task?.workspace?.target) {

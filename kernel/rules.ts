@@ -23,6 +23,7 @@ export type TaskWorkspace = {
   mode: "prepare" | "develop" | "review" | "test";
   passed?: string;
   failed?: string;
+  integrateOn?: string[];
   reworkLimit?: number;
 };
 type RuleOptions = RuleWords & {

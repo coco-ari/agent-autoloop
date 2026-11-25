@@ -41,8 +41,8 @@ function job(id: string, run = 1): Job {
     },
   };
 }
-test("开发与返工使用各自摘要，审核测试保留 SHA，恢复和无改动不会重写提交", () => {
-  const first = prepareWorkspace(job("summary"), [home])!;
+test("开发与返工使用各自摘要，审核测试保留 SHA，恢复和无改动不会重写提交", async () => {
+  const first = (await prepareWorkspace(job("summary"), [home]))!;
   writeFileSync(join(first.worktree, "value.txt"), "developed");
   const a = captureWorkspace(first, "## **feat: 完善  `订单校验`**");
   assert.equal(git(repository, "show", "-s", "--format=%s", a.candidate), "feat: 完善 订单校验");
@@ -50,7 +50,7 @@ test("开发与返工使用各自摘要，审核测试保留 SHA，恢复和无�
     git(repository, "show", "-s", "--format=%b", a.candidate),
     "任务编号：summary\n任务尝试：1\n执行编号：1",
   );
-  const rework = prepareWorkspace(job("summary", 2), [home])!;
+  const rework = (await prepareWorkspace(job("summary", 2), [home]))!;
   writeFileSync(join(rework.worktree, "value.txt"), "fixed");
   const b = captureWorkspace(rework, 'fix: 修复 "数量"；保留 $(touch injected) 和 `符号`');
   assert.equal(
@@ -59,16 +59,19 @@ test("开发与返工使用各自摘要，审核测试保留 SHA，恢复和无�
   );
   assert.equal(existsSync(join(rework.worktree, "injected")), false);
   assert.notEqual(a.candidate, b.candidate);
-  assert.equal(captureWorkspace(prepareWorkspace(job("summary", 2), [home])!, "不应重写原提交").candidate, b.candidate);
+  assert.equal(
+    captureWorkspace((await prepareWorkspace(job("summary", 2), [home]))!, "不应重写原提交").candidate,
+    b.candidate,
+  );
   for (const mode of ["review", "test"] as const) {
     const next = job("summary", 3);
     next.rule.workspace!.mode = mode;
-    assert.equal(captureWorkspace(prepareWorkspace(next, [home])!).candidate, b.candidate);
+    assert.equal(captureWorkspace((await prepareWorkspace(next, [home]))!).candidate, b.candidate);
   }
   assert.equal(git(repository, "rev-list", "--count", `${first.base}..${b.candidate}`), "2");
   cleanupWorkspaces("summary", [home]);
 });
-test("缺失、英文、超长和控制字符摘要使用有界任务名称，缺少名称使用编号", () => {
+test("缺失、英文、超长和控制字符摘要使用有界任务名称，缺少名称使用编号", async () => {
   for (const [index, summary] of [
     undefined,
     "",
@@ -81,7 +84,7 @@ test("缺失、英文、超长和控制字符摘要使用有界任务名称，�
     const id = `fallback-${index}`;
     const input = job(id);
     if (index === 0) delete input.context.taskRequest;
-    const workspace = prepareWorkspace(input, [home])!;
+    const workspace = (await prepareWorkspace(input, [home]))!;
     writeFileSync(join(workspace.worktree, "value.txt"), String(index));
     const result = captureWorkspace(workspace, summary);
     assert.equal(
@@ -92,7 +95,7 @@ test("缺失、英文、超长和控制字符摘要使用有界任务名称，�
   }
   const input = job("long-title");
   input.context.taskRequest!.original.summary = "\n" + "订单🚀".repeat(40);
-  const workspace = prepareWorkspace(input, [home])!;
+  const workspace = (await prepareWorkspace(input, [home]))!;
   writeFileSync(join(workspace.worktree, "value.txt"), "bounded");
   const result = captureWorkspace(workspace);
   assert.equal(Array.from(git(repository, "show", "-s", "--format=%s", result.candidate)).length, 72);

@@ -30,36 +30,36 @@ const job = (id: string, mode: "prepare" | "develop" | "review" | "test", run = 
   context: { events: [], answers: [], timers: [], waiting: [], open: [], decided: [] },
 });
 
-test("审核或检查可以直接作为入口，固定基准候选并保留编辑隔离", () => {
-  const review = prepareWorkspace(job("review-entry", "review"), [approved])!;
+test("审核或检查可以直接作为入口，固定基准候选并保留编辑隔离", async () => {
+  const review = (await prepareWorkspace(job("review-entry", "review"), [approved]))!;
   assert.equal(review.candidate, review.base);
   assert.equal(captureWorkspace(review).candidate, review.base);
   assert.equal(review.directory, review.worktree);
   assert.match(readFileSync(join(review.directory, "sum.js"), "utf8"), /export const sum/);
-  const checked = prepareWorkspace(job("test-entry", "test"), [approved])!;
+  const checked = (await prepareWorkspace(job("test-entry", "test"), [approved]))!;
   assert.equal(checked.candidate, checked.base);
   writeFileSync(join(checked.directory, "sum.js"), "unexpected edit");
   assert.throws(() => captureWorkspace(checked), /修改|变化|改变/);
   cleanupWorkspaces("review-entry", [approved]);
   cleanupWorkspaces("test-entry", [approved]);
 });
-test("各任务独占 worktree，审核和测试核对固定候选，清理不删原仓库", () => {
-  const first = prepareWorkspace(job("one", "develop"), [approved])!;
-  const second = prepareWorkspace(job("two", "develop"), [approved])!;
+test("各任务独占 worktree，审核和测试核对固定候选，清理不删原仓库", async () => {
+  const first = (await prepareWorkspace(job("one", "develop"), [approved]))!;
+  const second = (await prepareWorkspace(job("two", "develop"), [approved]))!;
   assert.notEqual(first.directory, second.directory);
   writeFileSync(join(first.directory, "sum.js"), "export const sum = (a, b) => Number(a) + Number(b);\n");
   const evidence = captureWorkspace(first);
   assert.match(evidence.candidate!, /^[a-f0-9]{40}$/);
   assert.notEqual(evidence.candidate, evidence.base);
   assert.equal(captureWorkspace(first).candidate, evidence.candidate);
-  const review = prepareWorkspace(job("one", "review", 2), [approved])!;
+  const review = (await prepareWorkspace(job("one", "review", 2), [approved]))!;
   assert.equal(review.candidate, evidence.candidate);
   assert.equal(review.directory, first.directory);
   assert.match(readFileSync(join(review.directory, "sum.js"), "utf8"), /Number\(a\)/);
-  const tested = prepareWorkspace(job("one", "test", 3), [approved])!;
+  const tested = (await prepareWorkspace(job("one", "test", 3), [approved]))!;
   assert.equal(tested.directory, first.directory);
   assert.equal(tested.candidate, evidence.candidate);
-  assert.throws(() => prepareWorkspace(job("outside", "develop"), [join(approved, "unrelated")]), /批准/);
+  await assert.rejects(() => prepareWorkspace(job("outside", "develop"), [join(approved, "unrelated")]), /批准/);
   cleanupWorkspaces("one", [approved]);
   cleanupWorkspaces("one", [approved]);
   assert.equal(existsSync(first.directory), false);
@@ -69,48 +69,48 @@ test("各任务独占 worktree，审核和测试核对固定候选，清理不�
   cleanupWorkspaces("two", [approved]);
 });
 
-test("需求材料保留给开发，不能冒充开发提交或独立审核", () => {
-  const prepared = prepareWorkspace(job("requirements", "prepare"), [approved])!;
+test("需求材料保留给开发，不能冒充开发提交或独立审核", async () => {
+  const prepared = (await prepareWorkspace(job("requirements", "prepare"), [approved]))!;
   writeFileSync(join(prepared.directory, "requirements.md"), "需求：支持数值字符串，并验证原数值输入。\n");
   const requirement = captureWorkspace(prepared);
   assert.equal(requirement.mode, "prepare");
   assert.equal(requirement.candidate, prepared.base);
-  assert.throws(() => prepareWorkspace(job("requirements", "review", 2), [approved]), /候选/);
-  const developer = prepareWorkspace(job("requirements", "develop", 3), [approved])!;
+  await assert.rejects(() => prepareWorkspace(job("requirements", "review", 2), [approved]), /候选/);
+  const developer = (await prepareWorkspace(job("requirements", "develop", 3), [approved]))!;
   assert.equal(developer.directory, prepared.directory);
   assert.match(readFileSync(join(developer.directory, "requirements.md"), "utf8"), /数值字符串/);
   const candidate = captureWorkspace(developer);
-  const review = prepareWorkspace(job("requirements", "review", 4), [approved])!;
+  const review = (await prepareWorkspace(job("requirements", "review", 4), [approved]))!;
   assert.equal(captureWorkspace(review).candidate, candidate.candidate);
   writeFileSync(join(review.directory, "unexpected.js"), "export const changed = true;\n");
   assert.throws(() => captureWorkspace(review), /改变/);
   cleanupWorkspaces("requirements", [approved]);
 });
 
-test("主动要求修改不重复询问次数授权，旧人工要求不能放开后续自动返工", () => {
+test("主动要求修改不重复询问次数授权，旧人工要求不能放开后续自动返工", async () => {
   const initial = job("manual-rework", "develop");
   initial.rule.workspace!.reworkLimit = 0;
-  captureWorkspace(prepareWorkspace(initial, [approved])!);
+  captureWorkspace((await prepareWorkspace(initial, [approved]))!);
   const next = job("manual-rework", "develop", 2);
   next.rule.workspace!.reworkLimit = 0;
-  assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, true);
+  assert.equal((await prepareWorkspace(next, [approved]))!.requiresApproval, true);
   next.context.taskRequest = {
     explicit: true,
     original: { summary: "", detail: "需求" },
     changes: [],
     earlierChanges: 0,
   };
-  assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, false);
+  assert.equal((await prepareWorkspace(next, [approved]))!.requiresApproval, false);
   next.context.taskRequest.explicit = false;
-  assert.equal(prepareWorkspace(next, [approved])!.requiresApproval, true);
+  assert.equal((await prepareWorkspace(next, [approved]))!.requiresApproval, true);
   cleanupWorkspaces("manual-rework", [approved]);
 });
 
-test("清理可从 Git 注销和文件删除之间恢复，保留其他任务和原仓库", () => {
-  const other = prepareWorkspace(job("keep-other", "prepare"), [approved])!;
+test("清理可从 Git 注销和文件删除之间恢复，保留其他任务和原仓库", async () => {
+  const other = (await prepareWorkspace(job("keep-other", "prepare"), [approved]))!;
   for (const registered of [true, false]) {
     const id = "interrupted-" + registered;
-    const own = prepareWorkspace(job(id, "prepare"), [approved])!;
+    const own = (await prepareWorkspace(job(id, "prepare"), [approved]))!;
     if (registered) rmSync(join(own.directory, ".git"));
     else {
       git("worktree", "remove", "--force", own.directory);

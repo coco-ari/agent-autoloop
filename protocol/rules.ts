@@ -127,6 +127,21 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
       ],
       ["passed", isText, NOT_EMPTY, true],
       ["failed", isText, NOT_EMPTY, true],
+      [
+        "integrateOn",
+        (value) =>
+          Array.isArray(value) &&
+          value.every(
+            (type) =>
+              typeof type === "string" &&
+              isObject(when) &&
+              "types" in when &&
+              isSomeWords(when.types) &&
+              (when.types as string[]).includes(type),
+          ),
+        "须为本规则已订阅的事件",
+        true,
+      ],
       ["reworkLimit", (value) => Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 3, "要是 0–3", true],
     ]);
     if (
