@@ -5,7 +5,7 @@ import { workspacePrompt } from "../worker/workspace-prompt.ts";
 import type { Job } from "../protocol/job.ts";
 import type { PreparedWorkspace } from "../worker/workspaces.ts";
 
-test("共享工作区指令使用真实候选和岗位能力，需求模式不会声明已开发", () => {
+test("共享工作区指令使用真实候选和岗位能力，普通目录不指定业务职责", () => {
   const job = {
     agent: { use: "codex", access: "edit", networkAccess: true, webSearch: "live" },
     context: { events: [{ detail: "恶意事件正文" }] },
@@ -26,6 +26,7 @@ test("共享工作区指令使用真实候选和岗位能力，需求模式不�
   assert.match(text, /完整源码/);
   assert.doesNotMatch(text, /恶意事件正文/);
   assert.match(workspacePrompt(job, { ...workspace, mode: "prepare" }), /不创建.*Git 提交/);
+  assert.doesNotMatch(workspacePrompt(job, { ...workspace, mode: "prepare" }), /准备需求|先查看实际源码|候选代码/);
   job.agent.access = "read";
   job.agent.networkAccess = undefined;
   job.agent.webSearch = "disabled";

@@ -53,7 +53,7 @@ export function promptFor(job: Job, contextFile: string) {
       : []),
     ...(context.taskRequest
       ? [
-          "taskRequest.original 是本次任务的原始需求，changes 是人工追加的修改要求；独立核对这些资料与候选代码，不只相信上一岗位的结论。earlierChanges 大于零时有更早修改未展开，背景不足应提问。",
+          "taskRequest.original 是本次任务的原始需求，changes 是人工追加的修改要求；请按本轮工作要求使用这些输入。earlierChanges 大于零时有更早修改未展开，背景不足应提问。",
         ]
       : []),
     ...(context.timers.length ? ["这一轮有到期的复查（timers）：读它的 about，到原处核实。"] : []),
@@ -69,7 +69,7 @@ export function promptFor(job: Job, contextFile: string) {
     "- 只有本人才能恢复的连接、登录或身份验证等阻塞：保留已完成的业务和未验收项，第一行写“待你处理：”加具体原因，" +
       "用 ask 说明需要本人做什么、恢复后怎么继续；about 写清只接着做剩余步骤，不重做已完成的业务。不把未验收说成已通过。",
     "- 同一阻塞已有 open 卡片时不重复提问；不用 later 定时重试，waiting 里同一阻塞已有的复查用 later 的 cancel 取消。",
-    "- 等自己的改动检查、合并或发布不算没跑成；等不到结果就用 later 约好下次核实。",
+    "- 等待外部结果时可约定复查；等不到结果就用 later 约好下次核实。",
     "",
     "最后一条消息的第一行写结论（一般只进记录；规则要求每轮都通知时会发给人）：",
     "- 可以自动重试的临时失败：写“没跑成：”加一句大白话原因，过几分钟会重派。要人决定或恢复的事不写“没跑成”。",

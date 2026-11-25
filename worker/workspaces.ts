@@ -141,7 +141,7 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
     if (!ancestor(repository, value.base, head)) throw new Error("目标分支历史已重写，停止自动整合，请核实目标历史");
     const conflicts = git(directory, "ls-files", "--unmerged");
     if (conflicts)
-      integration = `目标分支整合存在冲突。保留双方有效改动，解决并 git add 冲突文件；由 Worker 固定合并候选，再重新审核和测试。当前基准 ${value.base}。`;
+      integration = `目标分支整合存在冲突。保留双方有效改动，解决并 git add 冲突文件；由 Worker 固定合并候选。当前基准 ${value.base}。`;
     else if (!ancestor(repository, head, git(directory, "rev-parse", "HEAD"))) {
       // 先保全上一轮提问前的修改，禁止用 reset 或清空目录来同步主线。
       const identity = { task: job.task.id, attempt: job.task.attempt, run: job.run };
@@ -162,10 +162,10 @@ export function prepareWorkspace(job: Job, roots: readonly string[]): PreparedWo
           commitMessage("合入目标分支更新", identity),
           head,
         );
-        integration = `已整合目标分支的新提交 ${head}。核对组合后的功能，再交独立审核与测试；旧通过记录不能代替本次检查。`;
+        integration = `已整合目标分支的新提交 ${head}。当前候选已包含该提交。`;
       } catch (error) {
         if (!git(directory, "ls-files", "--unmerged")) throw error;
-        integration = `已开始整合目标分支 ${head}，存在冲突。解决并 git add 冲突文件，保留双方有效修改；Worker 将固定候选并重新审核测试。`;
+        integration = `已开始整合目标分支 ${head}，存在冲突。解决并 git add 冲突文件，保留双方有效修改；Worker 将固定候选。`;
       }
     }
   }
@@ -211,13 +211,13 @@ export function captureWorkspace(prepared: PreparedWorkspace, summary?: string):
   } else if (prepared.mode === "prepare") {
     // 准备阶段只交接材料；提交及开发证据仍由后续开发阶段生成。
     if (git(prepared.worktree, "rev-parse", "HEAD") !== (candidate ?? prepared.base))
-      throw new Error("需求准备期间提交被改变，请核实任务代码");
+      throw new Error("任务目录中的提交被改变，请核实当前 HEAD");
     candidate ??= prepared.base;
   } else if (
     git(prepared.worktree, "rev-parse", "HEAD") !== candidate ||
     git(prepared.worktree, "status", "--porcelain", "--untracked-files=all")
   ) {
-    throw new Error("审核或测试期间候选代码被改变，结果不能作为通过依据");
+    throw new Error("固定提交或工作区文件被改变，请核实当前版本");
   }
   return { directory: prepared.directory, base: prepared.base, candidate: candidate!, mode: prepared.mode };
 }
