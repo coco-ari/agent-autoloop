@@ -94,6 +94,6 @@ export function processCommandSync(pid: number) {
 }
 
 /** Without stopping the process while it looks: the worker shares one with the hub, and PowerShell takes over a second to start. */
-export async function processCommand(pid: number) {
-  return (await execFileAsync(...commandOf(pid), { encoding: "utf8", windowsHide: true })).stdout;
+export async function processCommand(pid: number, signal?: AbortSignal) {
+  return (await execFileAsync(...commandOf(pid), { encoding: "utf8", windowsHide: true, signal })).stdout;
 }

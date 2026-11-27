@@ -2,7 +2,7 @@
 // job. An agent runs detached, in its own process group, writing to files, so the worker can stop and come back and
 // find it still going, or finished. A job is saved before anything slow happens; a result is saved before it's handed
 // in and stays until the hub has taken it.
-import { execFileSync, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { HubError, type Hub } from "../protocol/client.ts";
 import { HOME } from "../host/home.ts";
 import { commandLine, processCommand } from "../host/command.ts";
@@ -135,10 +136,11 @@ const quoted = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 const marker = (entry: Entry) => `agent-autoloop-run:${entry.run}:${entry.attempt}:${entry.turn}`;
 
 /** Whether the run's process is still going: false when it is gone, null when we could not look. */
-async function alive(entry: Entry): Promise<boolean | null> {
+async function inspectProcess(entry: Entry, deadline?: AbortSignal): Promise<boolean | null> {
   if (!entry.pid) return false;
+  if (deadline?.aborted) return null;
   try {
-    const command = await processCommand(entry.pid);
+    const command = await processCommand(entry.pid, deadline);
     return command.includes(marker(entry));
   } catch (error) {
     // A process that is gone makes ps exit with status 1; anything else (EPERM, EACCES, a spawn
@@ -149,17 +151,10 @@ async function alive(entry: Entry): Promise<boolean | null> {
   }
 }
 
-function signal(entry: Entry, name: NodeJS.Signals) {
-  try {
-    if (entry.pid) process.kill(process.platform === "win32" ? entry.pid : -entry.pid, name);
-  } catch {}
-}
-
 /** Whether anything in the run's group is still going, null when we could not look. */
-async function groupAlive(entry: Entry): Promise<boolean | null> {
+function unixGroupAlive(entry: Entry): boolean | null {
   // The wrapper can die before a child; zombies have already stopped and only their parent can reap them.
   if (!entry.pid) return false;
-  if (process.platform === "win32") return alive(entry);
   try {
     return execFileSync("ps", ["-ax", "-o", "pgid=", "-o", "stat="], { encoding: "utf8" })
       .trim()
@@ -214,6 +209,61 @@ export function createWorker({
   let blind = false;
   let tidied = -Infinity;
   let outputProgress = false;
+  const supervisors = new Map<string, ChildProcess>();
+  const budgetSpent = Symbol();
+  let lookupWindow: { end: number; spent: Promise<typeof budgetSpent> } | undefined;
+  let inspection:
+    { dir: string; pid: number; controller: AbortController; answer: Promise<boolean | null> } | undefined;
+  let lastInspected: string | undefined;
+  function forgetSupervisor(dir: string) {
+    supervisors.delete(dir);
+    if (inspection?.dir === dir) {
+      inspection.controller.abort();
+      inspection = undefined;
+    }
+  }
+  function ownSupervisor(entry: Entry) {
+    const child = supervisors.get(entry.dir);
+    return entry.pid && child?.pid === entry.pid ? child : undefined;
+  }
+  async function alive(entry: Entry) {
+    if (process.platform !== "win32" || !entry.pid) return inspectProcess(entry);
+    const child = ownSupervisor(entry);
+    if (child) return child.exitCode === null && child.signalCode === null;
+    try {
+      process.kill(entry.pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        forgetSupervisor(entry.dir);
+        return false;
+      }
+    }
+    if (inspection && (inspection.dir !== entry.dir || inspection.pid !== entry.pid)) return null;
+    // 每轮最多等五秒。同一条系统查询可以跨轮询继续，三十秒仍无结果才终止。
+    lookupWindow ??= { end: Date.now() + 5000, spent: delay(5000, budgetSpent, { ref: false }) };
+    if (Date.now() >= lookupWindow.end) return null;
+    if (!inspection) {
+      const controller = new AbortController();
+      const timeout = AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]);
+      inspection = { dir: entry.dir, pid: entry.pid, controller, answer: inspectProcess(entry, timeout) };
+      lastInspected = entry.dir;
+    }
+    const result = await Promise.race([inspection.answer, lookupWindow.spent]);
+    if (result === budgetSpent) return null;
+    inspection = undefined;
+    return result;
+  }
+  const groupAlive = (entry: Entry) => (process.platform === "win32" ? alive(entry) : unixGroupAlive(entry));
+  async function signal(entry: Entry, name: NodeJS.Signals, verified?: boolean | null) {
+    if (!entry.pid) return;
+    try {
+      if (process.platform !== "win32") return process.kill(-entry.pid, name);
+      const child = ownSupervisor(entry);
+      if (child) return child.kill(name);
+      // 恢复的进程号可能已经分配给其他程序，只对已核实属于本轮的进程发信号。
+      if ((verified === undefined ? await alive(entry) : verified) === true) process.kill(entry.pid, name);
+    } catch {}
+  }
   const said = new Set<string>();
   /** Trouble that lasts comes round every second, and once in the log will do. */
   const sayOnce = (line: string) => {
@@ -233,6 +283,7 @@ export function createWorker({
 
   /** Starts a turn of the agent: a process that outlives this one, leaving its output and exit code in files. */
   async function launch(entry: Entry, adapter: Adapter, prompt: string) {
+    forgetSupervisor(entry.dir);
     if (entry.job.task)
       writeFileSync(
         path.join(entry.dir, "owner.json"),
@@ -332,6 +383,7 @@ export function createWorker({
         child.on("error", (error) => log(`run ${entry.run}: ${error}`));
         child.unref();
         entry.pid = child.pid;
+        if (entry.pid) supervisors.set(entry.dir, child);
       } finally {
         closeSync(output);
         closeSync(errors);
@@ -374,6 +426,7 @@ export function createWorker({
   function endWith(entry: Entry, result: Result) {
     entry.result = result;
     save(entry);
+    if (inspection?.dir === entry.dir) forgetSupervisor(entry.dir);
   }
 
   async function start(job: Job, cancelled = false) {
@@ -544,7 +597,7 @@ export function createWorker({
     if (entry.stopping !== undefined) {
       const going = await groupAlive(entry);
       if (going !== false) {
-        if (now() - entry.stopping > STOP_GRACE) signal(entry, "SIGKILL");
+        if (now() - entry.stopping > STOP_GRACE) await signal(entry, "SIGKILL", going);
         if (going === null) sayOnce(`run ${entry.run}: 无法核实进程已结束，保留停止请求继续检查`);
         return;
       }
@@ -555,7 +608,7 @@ export function createWorker({
       adapter = await adapterFor(entry.job.agent.use);
     } catch (error) {
       if (entry.turn > 0 && !groupEnded && (await groupAlive(entry)) !== false) {
-        stop(entry, "adapter");
+        await stop(entry, "adapter");
         return;
       }
       const known = { ...(entry.session && { session: entry.session }), ...(entry.usage && { usage: entry.usage }) };
@@ -613,12 +666,12 @@ export function createWorker({
         entry.finishedAt = moment;
         save(entry);
       } else if (moment - entry.finishedAt > GRACE) {
-        stop(entry, "finished");
+        await stop(entry, "finished");
       }
     }
   }
 
-  function stop(entry: Entry, why: NonNullable<Entry["why"]>) {
+  async function stop(entry: Entry, why: NonNullable<Entry["why"]>) {
     if (entry.result) return;
     if (entry.stopping !== undefined) {
       // 取消优先于超时和回执收尾，不重置宽限期，也不能在收尾时再启动修复。
@@ -631,7 +684,7 @@ export function createWorker({
     entry.stopping = now();
     entry.why = why;
     save(entry);
-    signal(entry, "SIGTERM");
+    await signal(entry, "SIGTERM");
     log(`run ${entry.run}: stopping (${why})`);
   }
 
@@ -683,6 +736,7 @@ export function createWorker({
         { mode: 0o600 },
       );
     unlinkSync(path.join(entry.dir, "entry.json"));
+    forgetSupervisor(entry.dir);
   }
 
   function outputReady(entry: Entry) {
@@ -767,8 +821,11 @@ export function createWorker({
   }
 
   /** Trouble with one run, a folder it can't write to say, is for the next round and holds up no other. */
-  async function eachEntry(step: (entry: Entry) => Promise<unknown>) {
-    for (const entry of entries()) {
+  async function eachEntry(step: (entry: Entry) => Promise<unknown>, afterDir?: string) {
+    const list = entries();
+    // 下轮从上次查到的进程之后继续，避免某个挂起的系统查询一直耗尽后续执行的时限。
+    const start = afterDir ? list.findIndex((entry) => entry.dir === afterDir) + 1 : 0;
+    for (const entry of start ? list.slice(start).concat(list.slice(0, start)) : list) {
       try {
         await step(entry);
       } catch (error) {
@@ -779,6 +836,7 @@ export function createWorker({
 
   /** One round: look at what's in hand, hand in what's ended, come for more. Whether the hub could be reached. */
   async function tick() {
+    lookupWindow = undefined;
     if (roots.length && hub.reportWorker && now() - reportedAt > 60000) {
       try {
         await hub.reportWorker(await inspectWorker(roots));
@@ -805,7 +863,7 @@ export function createWorker({
         });
         for (const id of answer?.cancel ?? []) {
           const entry = recovering.find((entry) => entry.run === id);
-          if (entry) stop(entry, "cancel");
+          if (entry) await stop(entry, "cancel");
         }
       } catch (error) {
         log(`启动前无法核对停止请求：${error}`);
@@ -815,7 +873,7 @@ export function createWorker({
     }
     await eachEntry(async (entry) => {
       if (recoveryChecked || entry.turn > 0 || entry.why === "cancel") await check(entry);
-    });
+    }, lastInspected);
     await eachEntry(settle);
     if (!recoveryChecked) return false;
     const held = entries();
@@ -832,7 +890,7 @@ export function createWorker({
       });
       for (const id of answer?.cancel ?? []) {
         const entry = held.find((entry) => entry.run === id);
-        if (entry) stop(entry, "cancel");
+        if (entry) await stop(entry, "cancel");
       }
       for (const request of answer?.cleanup ?? []) {
         try {
@@ -893,6 +951,7 @@ export function createWorker({
         if ((await groupAlive(entry)) !== false) throw new Error("尚未核实本机进程结束");
       }
       renameSync(dir, dir + ".deleting");
+      forgetSupervisor(dir);
       rmSync(dir + ".deleting", { recursive: true, force: true });
     }
     const ownUsage = ownedDirectory(path.dirname(usage), path.basename(usage));

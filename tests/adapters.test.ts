@@ -295,6 +295,18 @@ test("Codex: only a finished turn's last message is its answer", () => {
   const warning = { type: "item.completed", item: { type: "error", message: "under development" } };
   const said = (text: string) => ({ type: "item.completed", item: { type: "agent_message", text } });
   const ended = { type: "turn.completed", usage: { input_tokens: 9, cached_input_tokens: 3, output_tokens: 1 } };
+  const reconnect = { type: "error", message: "Reconnecting... 2/5 (request timed out)" };
+  assert.deepEqual(codex.read(lines(started, reconnect, said("交回审核结论"), ended), 0, ""), {
+    session: "t",
+    text: "交回审核结论",
+    finished: true,
+    sessionUsage: { input: 9, output: 1, cached: 3 },
+  });
+  assert.equal(codex.read(lines(started, reconnect, said("暂未完成")), 1, "").error, reconnect.message);
+  assert.equal(
+    codex.read(lines(started, reconnect, { type: "turn.failed", error: { message: "连接最终失败" } }), 1, "").error,
+    "连接最终失败",
+  );
   assert.deepEqual(codex.read(lines(started, warning, said("中途"), said("好了"), ended), 0, ""), {
     session: "t",
     text: "好了",
