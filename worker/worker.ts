@@ -141,6 +141,8 @@ async function inspectProcess(entry: Entry, deadline?: AbortSignal): Promise<boo
   if (deadline?.aborted) return null;
   try {
     const command = await processCommand(entry.pid, deadline);
+    // Windows 查到了进程也可能无权读取命令行，空内容留待下轮再核实。
+    if (process.platform === "win32" && !command.trim()) return null;
     return command.includes(marker(entry));
   } catch (error) {
     // A process that is gone makes ps exit with status 1; anything else (EPERM, EACCES, a spawn

@@ -78,7 +78,8 @@ setTimeout(() => clearInterval(timer), 90000).unref();`,
         lookups++;
         helpers.push(this);
         const script =
-          lookups === 1 ? 'setTimeout(()=>console.log("agent-autoloop-run:71:1:1"),6500)' : "setTimeout(()=>{},75000)";
+          ['setTimeout(()=>console.log("agent-autoloop-run:71:1:1"),6500)', 'console.log("")'][lookups - 1] ??
+          "setTimeout(()=>{},75000)";
         options = { ...options, file: process.execPath, args: [process.execPath, "-e", script] };
       }
       return spawn.call(this as typeof prototype, options);
@@ -102,16 +103,22 @@ setTimeout(() => clearInterval(timer), 90000).unref();`,
       await recovered.tick();
       await recovered.tick();
       assert.equal(lookups, 2);
+      assert.ok(
+        recovered.entries().some((entry) => entry.run === 72 && !entry.result),
+        "命令行不可见，保留执行",
+      );
+      await recovered.tick();
+      assert.equal(lookups, 3);
       const deadline = Date.now() + 32000;
-      while (!helpers[1].killed && Date.now() < deadline) await delay(50);
-      assert.ok(helpers[1].killed, "无响应的系统查询必须被终止");
+      while (!helpers[2].killed && Date.now() < deadline) await delay(50);
+      assert.ok(helpers[2].killed, "无响应的系统查询必须被终止");
       writeFileSync(release, "");
       const until = Date.now() + 12000;
       while (!existsSync(join(dir, "worker", "runs", "72-1", "exit-1")) && Date.now() < until) await delay(50);
       await recovered.tick();
       await recovered.tick();
       assert.deepEqual(results.sort(), [71, 72]);
-      assert.equal(lookups, 2, "已确认进程退出或收到退出记录即可交接");
+      assert.equal(lookups, 3, "已确认进程退出或收到退出记录即可交接");
     } finally {
       writeFileSync(release, "");
       const until = Date.now() + 10000;
