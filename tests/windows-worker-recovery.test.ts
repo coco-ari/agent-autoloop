@@ -1,10 +1,33 @@
 import assert from "node:assert/strict";
-import { ChildProcess } from "node:child_process";
+import { ChildProcess, spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { windowsSupervisor } from "../host/command.ts";
+
+test("Windows 进程号存在但创建时间不匹配时保留该进程", { skip: process.platform !== "win32" }, async () => {
+  const child = spawn(process.execPath, ["-e", "setTimeout(()=>{},20000)"], { stdio: "ignore", windowsHide: true });
+  const closed = once(child, "close");
+  try {
+    assert.equal(
+      await windowsSupervisor(
+        child.pid!,
+        "agent-autoloop-run:71:1:1",
+        "630000000000000000",
+        true,
+        AbortSignal.timeout(5000),
+      ),
+      false,
+    );
+    assert.doesNotThrow(() => process.kill(child.pid!, 0));
+  } finally {
+    child.kill();
+    await closed;
+  }
+});
 
 test(
   "Windows 自己启动的执行免查询，重启接管共用限时，退出后只交回一次",
@@ -77,10 +100,19 @@ setTimeout(() => clearInterval(timer), 90000).unref();`,
       ) {
         lookups++;
         helpers.push(this);
-        const script =
-          ['setTimeout(()=>console.log("agent-autoloop-run:71:1:1"),6500)', 'console.log("")'][lookups - 1] ??
-          "setTimeout(()=>{},75000)";
-        options = { ...options, file: process.execPath, args: [process.execPath, "-e", script] };
+        const stub =
+          [
+            "Start-Sleep -Milliseconds 6500; [pscustomobject]@{CommandLine='node agent-autoloop-run:71:1:1'}",
+            "[pscustomobject]@{CommandLine=''}",
+          ][lookups - 1] ?? "Start-Sleep -Seconds 75";
+        const script = Buffer.from(options.args.at(-1)!, "base64").toString("utf16le");
+        const args = options.args.slice(0, -1);
+        args.push(
+          Buffer.from(`function Get-CimInstance { param($ClassName,$Filter) ${stub} }\n${script}`, "utf16le").toString(
+            "base64",
+          ),
+        );
+        options = { ...options, args };
       }
       return spawn.call(this as typeof prototype, options);
     });
@@ -90,6 +122,13 @@ setTimeout(() => clearInterval(timer), 90000).unref();`,
       await owner.tick();
       await owner.tick();
       assert.equal(lookups, 0);
+      // 模拟升级前还没有系统创建时间记录的两条在途执行。
+      for (const run of [71, 72]) {
+        const identity = join(dir, "worker", "runs", run + "-1", "command-1.json.identity");
+        const until = Date.now() + 12000;
+        while (!existsSync(identity) && Date.now() < until) await delay(50);
+        rmSync(identity);
+      }
       const stopping = join(dir, "worker", "runs", "71-1", "entry.json");
       const entry = JSON.parse(readFileSync(stopping, "utf8"));
       writeFileSync(stopping, JSON.stringify({ ...entry, why: "cancel", stopping: Date.now() - 60000 }));

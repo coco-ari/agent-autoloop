@@ -97,3 +97,27 @@ export function processCommandSync(pid: number) {
 export async function processCommand(pid: number, signal?: AbortSignal) {
   return (await execFileAsync(...commandOf(pid), { encoding: "utf8", windowsHide: true, signal })).stdout;
 }
+
+export async function windowsSupervisor(
+  pid: number,
+  marker: string,
+  started: string | undefined,
+  stop: boolean,
+  signal?: AbortSignal,
+) {
+  const identify = started
+    ? `$identity = [string]$process.StartTime.ToUniversalTime().Ticks; $matchesRun = $identity -eq ${psQuote(started)}`
+    : `$identity = (Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}').CommandLine; $matchesRun = $identity -and (($identity.Trim() -split '\\s+')[-1].Trim('"') -ceq ${psQuote(marker)})`;
+  // 停止时先固定系统进程句柄，核对和终止使用同一对象，避免进程号被其他程序复用。
+  const script = `$process = [Diagnostics.Process]::GetProcessById(${pid})
+try {
+  ${stop ? "$null = $process.Handle" : ""}
+  ${identify}
+  if ([string]::IsNullOrWhiteSpace($identity)) { return }
+  if ($matchesRun) { ${stop ? "$process.Kill();" : ""} 'match' } else { 'different' }
+} finally { $process.Dispose() }`;
+  const answer = (
+    await execFileAsync(POWERSHELL, encoded(script), { encoding: "utf8", windowsHide: true, signal })
+  ).stdout.trim();
+  return answer === "match" ? true : answer === "different" ? false : null;
+}

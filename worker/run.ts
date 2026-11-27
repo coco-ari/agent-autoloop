@@ -21,6 +21,8 @@ if (process.argv[2] === "--supervise") {
       process.argv[3],
       "-Marker",
       process.argv[4],
+      "-SupervisorPid",
+      String(process.pid),
     ],
     { stdio: "inherit", windowsHide: true },
   );

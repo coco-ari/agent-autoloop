@@ -1,6 +1,5 @@
-# A job object keeps every descendant in the turn, including after its immediate parent exits. Closing the supervisor
-# kills the whole job, so cancelling a turn or a crashed supervisor cannot leave an Agent running by itself.
-param([string]$RunFile, [string]$Marker)
+﻿# 监督进程用 Windows 作业对象管理本轮所有子进程，结束监督进程会一并停止它们。
+param([string]$RunFile, [string]$Marker, [int]$SupervisorPid)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -42,5 +41,13 @@ public static class TurnJob {
 }
 '@
 [TurnJob]::Own()
+# 在启动 Agent 之前记录监督进程的系统创建时间，Worker 重启后可用它识别进程号是否被复用。
+try {
+    $started = [System.Diagnostics.Process]::GetProcessById($SupervisorPid).StartTime.ToUniversalTime().Ticks
+    [IO.File]::WriteAllText("$RunFile.identity.tmp", "$SupervisorPid $started $Marker")
+    [IO.File]::Move("$RunFile.identity.tmp", "$RunFile.identity")
+} catch {
+    [Console]::Error.WriteLine("无法登记监督进程创建时间，将按本轮命令行标记核对。")
+}
 & $env:AGENT_AUTOLOOP_NODE --disable-warning=ExperimentalWarning "$PSScriptRoot\run.ts" $RunFile
 exit $LASTEXITCODE

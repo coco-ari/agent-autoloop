@@ -25,7 +25,7 @@ import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { HubError, type Hub } from "../protocol/client.ts";
 import { HOME } from "../host/home.ts";
-import { commandLine, processCommand } from "../host/command.ts";
+import { commandLine, processCommand, windowsSupervisor } from "../host/command.ts";
 import type { Job } from "../protocol/job.ts";
 import { OUTPUT_CHUNK_BYTES, type OutputChunk } from "../protocol/output.ts";
 import { addUsage, type Notice, type Result } from "../protocol/validate.ts";
@@ -136,13 +136,20 @@ const quoted = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 const marker = (entry: Entry) => `agent-autoloop-run:${entry.run}:${entry.attempt}:${entry.turn}`;
 
 /** Whether the run's process is still going: false when it is gone, null when we could not look. */
-async function inspectProcess(entry: Entry, deadline?: AbortSignal): Promise<boolean | null> {
+async function inspectProcess(entry: Entry, deadline?: AbortSignal, stop = false): Promise<boolean | null> {
   if (!entry.pid) return false;
   if (deadline?.aborted) return null;
   try {
+    if (process.platform === "win32") {
+      const identity = files(entry).command + ".identity";
+      if (existsSync(identity)) {
+        const [pid, started, turn] = readFileSync(identity, "utf8").trim().split(" ");
+        if (pid !== String(entry.pid) || turn !== marker(entry) || !/^\d{15,19}$/.test(started)) return null;
+        return await windowsSupervisor(entry.pid, turn, started, stop, deadline);
+      }
+      return await windowsSupervisor(entry.pid, marker(entry), undefined, stop, deadline);
+    }
     const command = await processCommand(entry.pid, deadline);
-    // Windows 查到了进程也可能无权读取命令行，空内容留待下轮再核实。
-    if (process.platform === "win32" && !command.trim()) return null;
     return command.includes(marker(entry));
   } catch (error) {
     // A process that is gone makes ps exit with status 1; anything else (EPERM, EACCES, a spawn
@@ -215,7 +222,8 @@ export function createWorker({
   const budgetSpent = Symbol();
   let lookupWindow: { end: number; spent: Promise<typeof budgetSpent> } | undefined;
   let inspection:
-    { dir: string; pid: number; controller: AbortController; answer: Promise<boolean | null> } | undefined;
+    | { dir: string; pid: number; stop: boolean; controller: AbortController; answer: Promise<boolean | null> }
+    | undefined;
   let lastInspected: string | undefined;
   function forgetSupervisor(dir: string) {
     supervisors.delete(dir);
@@ -228,7 +236,7 @@ export function createWorker({
     const child = supervisors.get(entry.dir);
     return entry.pid && child?.pid === entry.pid ? child : undefined;
   }
-  async function alive(entry: Entry) {
+  async function alive(entry: Entry, stop = false) {
     if (process.platform !== "win32" || !entry.pid) return inspectProcess(entry);
     const child = ownSupervisor(entry);
     if (child) return child.exitCode === null && child.signalCode === null;
@@ -241,13 +249,14 @@ export function createWorker({
       }
     }
     if (inspection && (inspection.dir !== entry.dir || inspection.pid !== entry.pid)) return null;
+    if (stop && inspection && !inspection.stop) forgetSupervisor(entry.dir);
     // 每轮最多等五秒。同一条系统查询可以跨轮询继续，三十秒仍无结果才终止。
     lookupWindow ??= { end: Date.now() + 5000, spent: delay(5000, budgetSpent, { ref: false }) };
     if (Date.now() >= lookupWindow.end) return null;
     if (!inspection) {
       const controller = new AbortController();
       const timeout = AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]);
-      inspection = { dir: entry.dir, pid: entry.pid, controller, answer: inspectProcess(entry, timeout) };
+      inspection = { dir: entry.dir, pid: entry.pid, stop, controller, answer: inspectProcess(entry, timeout, stop) };
       lastInspected = entry.dir;
     }
     const result = await Promise.race([inspection.answer, lookupWindow.spent]);
@@ -255,15 +264,13 @@ export function createWorker({
     inspection = undefined;
     return result;
   }
-  const groupAlive = (entry: Entry) => (process.platform === "win32" ? alive(entry) : unixGroupAlive(entry));
-  async function signal(entry: Entry, name: NodeJS.Signals, verified?: boolean | null) {
+  const groupAlive = (entry: Entry, stop = false) =>
+    process.platform === "win32" ? alive(entry, stop) : unixGroupAlive(entry);
+  function signal(entry: Entry, name: NodeJS.Signals) {
     if (!entry.pid) return;
     try {
       if (process.platform !== "win32") return process.kill(-entry.pid, name);
-      const child = ownSupervisor(entry);
-      if (child) return child.kill(name);
-      // 恢复的进程号可能已经分配给其他程序，只对已核实属于本轮的进程发信号。
-      if ((verified === undefined ? await alive(entry) : verified) === true) process.kill(entry.pid, name);
+      ownSupervisor(entry)?.kill(name);
     } catch {}
   }
   const said = new Set<string>();
@@ -597,9 +604,9 @@ export function createWorker({
       return endWith(entry, { outcome: "cancelled", summary: "启动前已停止" });
     let groupEnded = false;
     if (entry.stopping !== undefined) {
-      const going = await groupAlive(entry);
+      const going = await groupAlive(entry, true);
       if (going !== false) {
-        if (now() - entry.stopping > STOP_GRACE) await signal(entry, "SIGKILL", going);
+        if (now() - entry.stopping > STOP_GRACE) signal(entry, "SIGKILL");
         if (going === null) sayOnce(`run ${entry.run}: 无法核实进程已结束，保留停止请求继续检查`);
         return;
       }
@@ -610,7 +617,7 @@ export function createWorker({
       adapter = await adapterFor(entry.job.agent.use);
     } catch (error) {
       if (entry.turn > 0 && !groupEnded && (await groupAlive(entry)) !== false) {
-        await stop(entry, "adapter");
+        stop(entry, "adapter");
         return;
       }
       const known = { ...(entry.session && { session: entry.session }), ...(entry.usage && { usage: entry.usage }) };
@@ -668,12 +675,12 @@ export function createWorker({
         entry.finishedAt = moment;
         save(entry);
       } else if (moment - entry.finishedAt > GRACE) {
-        await stop(entry, "finished");
+        stop(entry, "finished");
       }
     }
   }
 
-  async function stop(entry: Entry, why: NonNullable<Entry["why"]>) {
+  function stop(entry: Entry, why: NonNullable<Entry["why"]>) {
     if (entry.result) return;
     if (entry.stopping !== undefined) {
       // 取消优先于超时和回执收尾，不重置宽限期，也不能在收尾时再启动修复。
@@ -686,7 +693,7 @@ export function createWorker({
     entry.stopping = now();
     entry.why = why;
     save(entry);
-    await signal(entry, "SIGTERM");
+    signal(entry, "SIGTERM");
     log(`run ${entry.run}: stopping (${why})`);
   }
 
@@ -865,7 +872,7 @@ export function createWorker({
         });
         for (const id of answer?.cancel ?? []) {
           const entry = recovering.find((entry) => entry.run === id);
-          if (entry) await stop(entry, "cancel");
+          if (entry) stop(entry, "cancel");
         }
       } catch (error) {
         log(`启动前无法核对停止请求：${error}`);
@@ -892,7 +899,7 @@ export function createWorker({
       });
       for (const id of answer?.cancel ?? []) {
         const entry = held.find((entry) => entry.run === id);
-        if (entry) await stop(entry, "cancel");
+        if (entry) stop(entry, "cancel");
       }
       for (const request of answer?.cleanup ?? []) {
         try {
